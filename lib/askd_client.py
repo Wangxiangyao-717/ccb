@@ -119,7 +119,9 @@ def maybe_start_daemon(spec: ProviderClientSpec, work_dir: Path) -> bool:
     try:
         kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
         if os.name == "nt":
-            kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            # CREATE_NO_WINDOW: 隐藏窗口但保留控制台附着，子进程可继承 WezTerm 上下文
+            # DETACHED_PROCESS: 完全脱离控制台，会丢失 WezTerm cli 通信能力
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         else:
             kwargs["start_new_session"] = True
         subprocess.Popen(argv, **kwargs)

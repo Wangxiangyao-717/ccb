@@ -196,6 +196,11 @@ ccb up codex gemini     # Start both
 ccb up codex gemini opencode  # Start all three (spaces)
 ccb up codex,gemini,opencode  # Start all three (commas)
 
+# Custom Claude launcher (model selection via wrapper script)
+ccb up -C dpsk codex           # Use dpsk.ps1/cmd to launch Claude with custom model
+ccb up -C glm codex gemini     # Use glm.ps1/cmd with multiple backends
+ccb up -C F:\pwsh_fast\dpsk.ps1 codex  # Full path to PowerShell script
+
 tmux tip: CCB's tmux status/pane theming is enabled only while CCB is running.
 ccb-layout              # Start 2x2 layout (Codex+Gemini+OpenCode)
 ```
@@ -203,6 +208,7 @@ ccb-layout              # Start 2x2 layout (Codex+Gemini+OpenCode)
 ### Flags
 | Flag | Description | Example |
 | :--- | :--- | :--- |
+| `-C`, `--claude-cmd` | Custom command/script to launch Claude (e.g., `.ps1` wrapper for model selection) | `ccb up -C dpsk codex` |
 | `-r` | Resume previous session context | `ccb up codex -r` |
 | `-a` | Auto-mode, skip permission prompts | `ccb up codex -a` |
 | `-h` | Show help information | `ccb -h` |

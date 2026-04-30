@@ -222,10 +222,12 @@ class AILauncher:
         providers: list,
         resume: bool = False,
         auto: bool = False,
+        claude_cmd: str = None,
     ):
         self.providers = providers or ["codex"]
         self.resume = resume
         self.auto = auto
+        self.claude_cmd = claude_cmd
         self.script_dir = Path(__file__).resolve().parent
         self.session_id = f"ai-{int(time.time())}-{os.getpid()}"
         self.temp_base = Path(tempfile.gettempdir())
@@ -1331,6 +1333,61 @@ class AILauncher:
             "❌ Claude CLI not found. Install: npm install -g @anthropic-ai/claude-code"
         )
 
+    def _resolve_custom_cmd(self, claude_cmd: str):
+        """
+        Resolve a user-supplied command for launching Claude.
+
+        Handles:
+          - .ps1 scripts → wrapped via powershell -File
+          - .cmd / .bat / .exe → used as-is (resolved via shutil.which)
+          - bare name like 'dpsk' → tries shutil.which first, then looks for
+            <name>.ps1 / <name>.cmd variants in PATH
+        """
+        # Already has an extension → handle directly
+        _, ext = os.path.splitext(claude_cmd)
+        ext_lower = ext.lower() if ext else ""
+
+        if ext_lower == ".ps1":
+            resolved = shutil.which(claude_cmd)
+            if not resolved:
+                # Maybe it's a path that exists but not in PATH
+                p = Path(claude_cmd)
+                if p.is_file():
+                    resolved = str(p)
+                else:
+                    raise FileNotFoundError(
+                        f"❌ PowerShell script not found: {claude_cmd}"
+                    )
+            return ["powershell", "-ExecutionPolicy", "Bypass", "-File", resolved]
+
+        if ext_lower in (".cmd", ".bat", ".exe"):
+            resolved = shutil.which(claude_cmd)
+            if resolved:
+                return resolved
+            p = Path(claude_cmd)
+            if p.is_file():
+                return str(p)
+            raise FileNotFoundError(
+                f"❌ Command not found: {claude_cmd}"
+            )
+
+        # No extension: try common resolutions on Windows
+        resolved = shutil.which(claude_cmd)
+        if resolved:
+            return resolved
+
+        # Try <name>.ps1
+        for variant in [f"{claude_cmd}.ps1", f"{claude_cmd}.cmd", f"{claude_cmd}.bat"]:
+            variant_path = shutil.which(variant)
+            if variant_path:
+                if variant_path.lower().endswith(".ps1"):
+                    return ["powershell", "-ExecutionPolicy", "Bypass", "-File", variant_path]
+                return variant_path
+
+        raise FileNotFoundError(
+            f"❌ Custom command not found: {claude_cmd}"
+        )
+
     def _start_claude(self) -> int:
         print(f"🚀 {t('starting_claude')}")
 
@@ -1374,12 +1431,21 @@ class AILauncher:
                 env["OPENCODE_TMUX_SESSION"] = self.tmux_panes.get("opencode", "")
 
         try:
-            claude_cmd = self._find_claude_cmd()
+            if self.claude_cmd:
+                claude_cmd = self._resolve_custom_cmd(self.claude_cmd)
+            else:
+                claude_cmd = self._find_claude_cmd()
         except FileNotFoundError as e:
             print(str(e))
             return 1
 
-        cmd = [claude_cmd]
+        # Build the command list.  For PowerShell scripts we use a list
+        # like ['powershell', '-File', 'dpsk.ps1'] so the arg list stays
+        # clean; for everything else we start with [claude_cmd].
+        if isinstance(claude_cmd, list):
+            cmd = claude_cmd
+        else:
+            cmd = [claude_cmd]
 
         # Check for .autoflow folder in current directory (CCA project)
         autoflow_dir = Path.cwd() / ".autoflow"
@@ -1527,6 +1593,7 @@ def cmd_up(args):
         providers=providers,
         resume=args.resume,
         auto=args.auto,
+        claude_cmd=args.claude_cmd,
     )
     return launcher.run_up()
 
@@ -2102,6 +2169,8 @@ def main():
         nargs="*",
         help="Backends to start (space or comma separated): codex, gemini, opencode",
     )
+    up_parser.add_argument("-C", "--claude-cmd", type=str, default=None,
+                            help="Custom command/script to launch Claude (e.g., dpsk, glm)")
     up_parser.add_argument("-r", "--resume", "--restore", action="store_true", help="Resume context")
     up_parser.add_argument("-a", "--auto", action="store_true", help="Full auto permission mode")
 
