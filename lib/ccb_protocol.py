@@ -94,6 +94,7 @@ class CaskdRequest:
     timeout_s: float
     quiet: bool
     message: str
+    caller_pane_id: str | None = None
     output_path: str | None = None
 
 

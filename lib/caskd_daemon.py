@@ -80,7 +80,7 @@ class _SessionWorker(BaseSessionWorker[_QueuedTask, CaskdResult]):
         req = task.request
         work_dir = Path(req.work_dir)
         write_log(log_path(CASKD_SPEC.log_file_name), f"[INFO] start session={self.session_key} req_id={task.req_id} work_dir={req.work_dir}")
-        session = load_project_session(work_dir)
+        session = load_project_session(work_dir, caller_pane_id=req.caller_pane_id)
         if not session:
             return CaskdResult(
                 exit_code=1,
@@ -446,7 +446,7 @@ class _WorkerPool:
         req_id = make_req_id()
         task = _QueuedTask(request=request, created_ms=_now_ms(), req_id=req_id, done_event=threading.Event())
 
-        session = load_project_session(Path(request.work_dir))
+        session = load_project_session(Path(request.work_dir), caller_pane_id=request.caller_pane_id)
         session_key = compute_session_key(session) if session else "codex:unknown"
 
         worker = self._pool.get_or_create(session_key, _SessionWorker)
@@ -471,6 +471,7 @@ class CaskdServer:
                     timeout_s=float(msg.get("timeout_s") or 300.0),
                     quiet=bool(msg.get("quiet") or False),
                     message=str(msg.get("message") or ""),
+                    caller_pane_id=str(msg.get("caller_pane_id") or "") or None,
                     output_path=str(msg.get("output_path")) if msg.get("output_path") else None,
                 )
             except Exception as exc:

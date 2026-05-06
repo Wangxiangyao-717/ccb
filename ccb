@@ -1145,6 +1145,7 @@ class AILauncher:
 
         if not self.resume:
             data = self._clear_codex_log_binding(data)
+        data.pop("ended_at", None)
 
         work_dir = Path.cwd()
         data.update({
@@ -1170,6 +1171,27 @@ class AILauncher:
         if not ok:
             print(err, file=sys.stderr)
             return False
+
+        registry_record = {
+            "ccb_session_id": self.session_id,
+            "codex_runtime_dir": str(runtime),
+            "codex_input_fifo": str(input_fifo),
+            "codex_output_fifo": str(output_fifo),
+            "codex_terminal": self.terminal_type,
+            "codex_tmux_session": tmux_session,
+            "codex_pane_id": pane_id,
+            "codex_pane_title_marker": pane_title_marker,
+            "codex_start_cmd": str(codex_start_cmd or ""),
+            "work_dir": str(work_dir),
+            "work_dir_norm": _normalize_path_for_match(str(work_dir)),
+        }
+        codex_session_path = str(data.get("codex_session_path") or "").strip()
+        if codex_session_path:
+            registry_record["codex_session_path"] = codex_session_path
+        codex_session_id = str(data.get("codex_session_id") or "").strip()
+        if codex_session_id:
+            registry_record["codex_session_id"] = codex_session_id
+        upsert_registry(registry_record)
         return True
 
     def _write_cend_registry(self, claude_pane_id: str, codex_pane_id: str | None) -> bool:

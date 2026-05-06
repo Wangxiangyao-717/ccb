@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from ccb_config import apply_backend_env
+from pane_registry import load_registry_by_claude_pane
 from session_utils import find_project_session_file as _find_project_session_file, safe_write_session
 from terminal import get_backend_for_session
 
@@ -29,6 +30,61 @@ def _read_json(path: Path) -> dict:
 
 def _now_str() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _normalize_work_dir(value: str | Path) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).resolve()).lower()
+    except Exception:
+        return raw.replace("\\", "/").lower()
+
+
+def _load_registry_backed_session(work_dir: Path, caller_pane_id: Optional[str]) -> Optional["CodexProjectSession"]:
+    pane_id = str(caller_pane_id or "").strip()
+    if not pane_id:
+        return None
+
+    record = load_registry_by_claude_pane(pane_id)
+    if not isinstance(record, dict):
+        return None
+
+    expected_work_dir = _normalize_work_dir(work_dir)
+    record_work_dir = _normalize_work_dir(record.get("work_dir_norm") or record.get("work_dir") or "")
+    if expected_work_dir and record_work_dir and expected_work_dir != record_work_dir:
+        return None
+
+    runtime_dir = str(record.get("codex_runtime_dir") or "").strip()
+    codex_pane_id = str(record.get("codex_pane_id") or "").strip()
+    terminal = str(record.get("codex_terminal") or record.get("terminal") or "").strip()
+    if not runtime_dir or not codex_pane_id or not terminal:
+        return None
+
+    session_file = _find_project_session_file(work_dir, ".codex-session") or (Path(work_dir).resolve() / ".codex-session")
+    data = {
+        "session_id": str(record.get("ccb_session_id") or "").strip(),
+        "runtime_dir": runtime_dir,
+        "terminal": terminal,
+        "tmux_session": record.get("codex_tmux_session"),
+        "pane_id": codex_pane_id,
+        "pane_title_marker": str(record.get("codex_pane_title_marker") or "").strip(),
+        "work_dir": str(record.get("work_dir") or work_dir),
+        "work_dir_norm": str(record.get("work_dir_norm") or expected_work_dir),
+        "active": True,
+    }
+    codex_start_cmd = str(record.get("codex_start_cmd") or "").strip()
+    if codex_start_cmd:
+        data["codex_start_cmd"] = codex_start_cmd
+        data["start_cmd"] = codex_start_cmd
+    codex_session_path = str(record.get("codex_session_path") or "").strip()
+    if codex_session_path:
+        data["codex_session_path"] = codex_session_path
+    codex_session_id = str(record.get("codex_session_id") or "").strip()
+    if codex_session_id:
+        data["codex_session_id"] = codex_session_id
+    return CodexProjectSession(session_file=session_file, data=data)
 
 
 @dataclass
@@ -151,7 +207,16 @@ class CodexProjectSession:
             _ = err
 
 
-def load_project_session(work_dir: Path) -> Optional[CodexProjectSession]:
+def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None) -> Optional[CodexProjectSession]:
+    caller_pane_id = (
+        str(caller_pane_id or "").strip()
+        or (os.environ.get("WEZTERM_PANE") or "").strip()
+        or (os.environ.get("TMUX_PANE") or "").strip()
+    )
+    session = _load_registry_backed_session(work_dir, caller_pane_id)
+    if session is not None:
+        return session
+
     session_file = find_project_session_file(work_dir)
     if not session_file:
         return None

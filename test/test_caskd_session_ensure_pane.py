@@ -125,3 +125,44 @@ def test_caskd_ensure_pane_marker_rediscover(tmp_path: Path, monkeypatch: pytest
 
     data = json.loads(session_path.read_text(encoding="utf-8"))
     assert data["pane_id"] == "%2"
+
+
+def test_load_project_session_prefers_registry_for_caller_pane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session_path = tmp_path / ".codex-session"
+    session_path.write_text(
+        json.dumps({
+            "session_id": "stale-session",
+            "terminal": "wezterm",
+            "pane_id": "999",
+            "pane_title_marker": "CCB-stale",
+            "runtime_dir": str(tmp_path / "stale-runtime"),
+            "work_dir": str(tmp_path),
+            "active": True,
+        }),
+        encoding="utf-8",
+    )
+
+    registry_runtime = tmp_path / "registry-runtime"
+    registry_runtime.mkdir()
+    monkeypatch.setattr(
+        caskd_session,
+        "load_registry_by_claude_pane",
+        lambda pane_id: {
+            "ccb_session_id": "registry-session",
+            "claude_pane_id": "16",
+            "codex_pane_id": "20",
+            "codex_runtime_dir": str(registry_runtime),
+            "codex_terminal": "wezterm",
+            "codex_pane_title_marker": "CCB-Codex",
+            "codex_start_cmd": "codex",
+            "work_dir": str(tmp_path),
+            "work_dir_norm": str(tmp_path).lower(),
+        },
+    )
+
+    sess = caskd_session.load_project_session(tmp_path, caller_pane_id="16")
+
+    assert sess is not None
+    assert sess.data["session_id"] == "registry-session"
+    assert sess.data["pane_id"] == "20"
+    assert sess.data["pane_title_marker"] == "CCB-Codex"

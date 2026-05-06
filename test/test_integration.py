@@ -148,7 +148,10 @@ def test_client_try_daemon_request(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     state_file = tmp_path / "state" / "itest.json"
     state_file.parent.mkdir(parents=True, exist_ok=True)
 
+    seen: dict[str, Any] = {}
+
     def handler(msg: dict) -> dict:
+        seen["caller_pane_id"] = msg.get("caller_pane_id")
         return {
             "type": f"{spec.protocol_prefix}.response",
             "v": 1,
@@ -194,6 +197,7 @@ def test_client_try_daemon_request(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     )
 
     monkeypatch.setenv(client_spec.enabled_env, "1")
+    monkeypatch.setenv("WEZTERM_PANE", "16")
     # try_daemon_request requires a session file to exist in the work dir (or a parent).
     work_dir = tmp_path / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -209,6 +213,7 @@ def test_client_try_daemon_request(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     ) or (None, None)
     assert reply == "echo:hello"
     assert exit_code == 0
+    assert seen["caller_pane_id"] == "16"
 
     assert askd_rpc.shutdown_daemon(spec.protocol_prefix, timeout_s=0.5, state_file=state_file) is True
     thread.join(timeout=3.0)

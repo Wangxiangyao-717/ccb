@@ -55,6 +55,11 @@ def try_daemon_request(spec: ProviderClientSpec, work_dir: Path, message: str, t
         return None
 
     try:
+        caller_pane_id = (
+            (os.environ.get("WEZTERM_PANE") or "").strip()
+            or (os.environ.get("TMUX_PANE") or "").strip()
+            or None
+        )
         payload = {
             "type": f"{spec.protocol_prefix}.request",
             "v": 1,
@@ -64,6 +69,7 @@ def try_daemon_request(spec: ProviderClientSpec, work_dir: Path, message: str, t
             "timeout_s": float(timeout),
             "quiet": bool(quiet),
             "message": message,
+            "caller_pane_id": caller_pane_id,
         }
         connect_timeout = min(1.0, max(0.1, float(timeout)))
         with socket.create_connection((host, port), timeout=connect_timeout) as sock:
