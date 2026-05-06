@@ -15,8 +15,8 @@ from terminal import get_backend_for_session
 apply_backend_env()
 
 
-def find_project_session_file(work_dir: Path) -> Optional[Path]:
-    return _find_project_session_file(work_dir, ".codex-session")
+def find_project_session_file(work_dir: Path, caller_pane_id: Optional[str] = None) -> Optional[Path]:
+    return _find_project_session_file(work_dir, ".codex-session", caller_pane_id=caller_pane_id)
 
 
 def _read_json(path: Path) -> dict:
@@ -62,7 +62,15 @@ def _load_registry_backed_session(work_dir: Path, caller_pane_id: Optional[str])
     if not runtime_dir or not codex_pane_id or not terminal:
         return None
 
-    session_file = _find_project_session_file(work_dir, ".codex-session") or (Path(work_dir).resolve() / ".codex-session")
+    session_file = (
+        _find_project_session_file(
+            work_dir,
+            ".codex-session",
+            caller_pane_id=pane_id,
+            session_id=str(record.get("ccb_session_id") or "").strip() or None,
+        )
+        or (Path(work_dir).resolve() / ".codex-session")
+    )
     data = {
         "session_id": str(record.get("ccb_session_id") or "").strip(),
         "runtime_dir": runtime_dir,
@@ -217,7 +225,7 @@ def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None) -
     if session is not None:
         return session
 
-    session_file = find_project_session_file(work_dir)
+    session_file = find_project_session_file(work_dir, caller_pane_id=caller_pane_id)
     if not session_file:
         return None
     data = _read_json(session_file)

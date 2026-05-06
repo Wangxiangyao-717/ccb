@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from importlib.machinery import SourceFileLoader
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -113,3 +114,104 @@ def test_start_codex_tmux_writes_bridge_pid(monkeypatch, tmp_path: Path) -> None
     runtime = Path(launcher.runtime_dir) / "codex"
     assert (runtime / "bridge.pid").exists()
     assert (runtime / "bridge.pid").read_text(encoding="utf-8").strip() == "999"
+
+
+def test_write_codex_session_uses_next_available_numbered_file(monkeypatch, tmp_path: Path) -> None:
+    ccb = _load_ccb_module()
+    monkeypatch.chdir(tmp_path)
+
+    (tmp_path / ".codex-session").write_text(json.dumps({"session_id": "old-0"}), encoding="utf-8")
+    (tmp_path / ".codex-session-1").write_text(json.dumps({"session_id": "old-1"}), encoding="utf-8")
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    launcher = ccb.AILauncher(providers=["codex"])
+    launcher.terminal_type = "wezterm"
+
+    ok = launcher._write_codex_session(
+        runtime,
+        None,
+        runtime / "input.fifo",
+        runtime / "output.fifo",
+        pane_id="20",
+        pane_title_marker="CCB-Codex",
+        codex_start_cmd="codex",
+    )
+
+    assert ok is True
+    created = tmp_path / ".codex-session-2"
+    assert created.exists()
+    assert json.loads(created.read_text(encoding="utf-8"))["session_id"] == launcher.session_id
+    assert json.loads((tmp_path / ".codex-session").read_text(encoding="utf-8"))["session_id"] == "old-0"
+
+
+def test_cleanup_only_marks_current_session_file_inactive(monkeypatch, tmp_path: Path) -> None:
+    ccb = _load_ccb_module()
+    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    launcher = ccb.AILauncher(providers=["codex"])
+    launcher.terminal_type = "wezterm"
+    launcher.wezterm_panes = {}
+
+    other_file = tmp_path / ".codex-session"
+    current_file = tmp_path / ".codex-session-1"
+    other_file.write_text(json.dumps({"session_id": "other", "active": True}), encoding="utf-8")
+    current_file.write_text(json.dumps({"session_id": launcher.session_id, "active": True}), encoding="utf-8")
+    launcher.session_files = {"codex": current_file}
+
+    registry_dir = home / ".ccb" / "run"
+    registry_dir.mkdir(parents=True)
+    registry_file = registry_dir / f"ccb-session-{launcher.session_id}.json"
+    registry_file.write_text(json.dumps({"ccb_session_id": launcher.session_id}), encoding="utf-8")
+
+    launcher.cleanup()
+
+    assert json.loads(other_file.read_text(encoding="utf-8"))["active"] is True
+    current_data = json.loads(current_file.read_text(encoding="utf-8"))
+    assert current_data["active"] is False
+    assert "ended_at" in current_data
+    assert not registry_file.exists()
+
+
+def test_get_latest_codex_session_id_writes_future_numbered_session_file(monkeypatch, tmp_path: Path) -> None:
+    ccb = _load_ccb_module()
+    monkeypatch.chdir(tmp_path)
+
+    existing = tmp_path / ".codex-session"
+    existing.write_text(json.dumps({"session_id": "other-session"}), encoding="utf-8")
+
+    session_root = tmp_path / "codex-sessions"
+    session_root.mkdir()
+    log_path = session_root / "latest.jsonl"
+    log_path.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "cwd": str(tmp_path),
+                    "id": "resume-target",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_SESSION_ROOT", str(session_root))
+
+    launcher = ccb.AILauncher(providers=["codex"])
+
+    session_id, has_history = launcher._get_latest_codex_session_id()
+
+    assert has_history is True
+    assert session_id == "resume-target"
+    assert json.loads(existing.read_text(encoding="utf-8"))["session_id"] == "other-session"
+    future_file = tmp_path / ".codex-session-1"
+    assert future_file.exists()
+    future_data = json.loads(future_file.read_text(encoding="utf-8"))
+    assert future_data["codex_session_id"] == "resume-target"
+    assert future_data["codex_session_path"] == str(log_path)

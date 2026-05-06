@@ -139,3 +139,16 @@ def upsert_registry(record: Dict[str, Any]) -> bool:
     except Exception as exc:
         _debug(f"Failed to write registry {path}: {exc}")
         return False
+
+
+def remove_registry(session_id: str) -> bool:
+    if not session_id:
+        return False
+    path = registry_path_for_session(str(session_id))
+    try:
+        if path.exists():
+            path.unlink()
+        return True
+    except Exception as exc:
+        _debug(f"Failed to remove registry {path}: {exc}")
+        return False

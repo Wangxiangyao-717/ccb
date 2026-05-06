@@ -2,10 +2,13 @@
 session_utils.py - Session file permission check utility
 """
 from __future__ import annotations
+import json
 import os
 import stat
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Iterable
+
+from pane_registry import load_registry_by_claude_pane
 
 
 def check_session_writable(session_file: Path) -> Tuple[bool, Optional[str], Optional[str]]:
@@ -118,12 +121,88 @@ def print_session_error(msg: str, to_stderr: bool = True) -> None:
     print(msg, file=output)
 
 
-def find_project_session_file(work_dir: Path, session_filename: str) -> Optional[Path]:
+def _iter_session_file_candidates(directory: Path, session_filename: str) -> Iterable[Path]:
+    base = directory / session_filename
+    numbered: list[tuple[int, Path]] = []
+
+    if base.exists():
+        yield base
+
+    prefix = f"{session_filename}-"
+    try:
+        for path in directory.glob(f"{session_filename}-*"):
+            if not path.is_file():
+                continue
+            suffix = path.name[len(prefix):]
+            if not suffix.isdigit():
+                continue
+            numbered.append((int(suffix), path))
+    except Exception:
+        return
+
+    for _idx, path in sorted(numbered, key=lambda item: item[0]):
+        yield path
+
+
+def _read_session_identity(path: Path) -> set[str]:
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
+    except Exception:
+        return set()
+
+    if not isinstance(data, dict):
+        return set()
+
+    values = {
+        str(data.get("session_id") or "").strip(),
+        str(data.get("ccb_session_id") or "").strip(),
+        str(data.get("claude_session_id") or "").strip(),
+    }
+    return {value for value in values if value}
+
+
+def allocate_session_file(work_dir: Path, session_filename: str, *, session_id: str | None = None) -> Path:
+    directory = Path(work_dir).resolve()
+    session_id = str(session_id or "").strip()
+
+    for candidate in _iter_session_file_candidates(directory, session_filename):
+        if session_id and session_id in _read_session_identity(candidate):
+            return candidate
+
+    base = directory / session_filename
+    if not base.exists():
+        return base
+
+    index = 1
+    while True:
+        candidate = directory / f"{session_filename}-{index}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def find_project_session_file(work_dir: Path, session_filename: str, *, caller_pane_id: str | None = None, session_id: str | None = None) -> Optional[Path]:
+    expected_session_id = str(session_id or "").strip()
+    if not expected_session_id:
+        pane_id = str(caller_pane_id or "").strip()
+        if pane_id:
+            try:
+                record = load_registry_by_claude_pane(pane_id)
+            except Exception:
+                record = None
+            if isinstance(record, dict):
+                expected_session_id = str(record.get("ccb_session_id") or "").strip()
+
     current = Path(work_dir).resolve()
     while True:
-        candidate = current / session_filename
-        if candidate.exists():
-            return candidate
+        candidates = list(_iter_session_file_candidates(current, session_filename))
+        if expected_session_id:
+            for candidate in candidates:
+                if expected_session_id in _read_session_identity(candidate):
+                    return candidate
+        if candidates:
+            return candidates[0]
         if current == current.parent:
             return None
         current = current.parent

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ccb_protocol import REQ_ID_PREFIX
 from ccb_config import apply_backend_env
 from i18n import t
+from session_utils import find_project_session_file
 from terminal import get_backend_for_session, get_pane_id_from_session
 
 apply_backend_env()
@@ -1013,13 +1014,11 @@ class OpenCodeCommunicator:
                 raise RuntimeError(f"❌ Session unhealthy: {msg}\nTip: Run 'ccb up opencode' to start a new session")
 
     def _find_session_file(self) -> Optional[Path]:
-        current = Path.cwd()
-        while current != current.parent:
-            candidate = current / ".opencode-session"
-            if candidate.exists():
-                return candidate
-            current = current.parent
-        return None
+        return find_project_session_file(
+            Path.cwd(),
+            ".opencode-session",
+            session_id=os.environ.get("OPENCODE_SESSION_ID"),
+        )
 
     def _load_session_info(self) -> Optional[dict]:
         if "OPENCODE_SESSION_ID" in os.environ:
