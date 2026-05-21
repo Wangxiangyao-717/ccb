@@ -28,6 +28,24 @@
 
 **简介：** 多模型协作能够有效避免模型偏见、认知漏洞和上下文限制，然而 MCP、Skills 等直接调用 API 方式存在诸多局限性。本项目打造了一套新的方案。
 
+## ⚡ 快速安装与使用
+
+```powershell
+# 1. nickcmd — 模型配置管理器，用 named profile 一键切换 Claude 模型
+git clone https://gitlab.leihuo.netease.com/l22/nickcmd.git
+cd nickcmd && powershell -ExecutionPolicy Bypass -File .\install.ps1 install
+
+# 2. CCB — 让 Claude 与 Codex/Gemini/OpenCode 互相交流
+#    分屏启动多个 AI，Claude 通过 /cask /gask /oask 委派任务、请求审查
+git clone https://gitlab.leihuo.netease.com/l22/l22claude_code_bridge.git
+cd l22claude_code_bridge && powershell -ExecutionPolicy Bypass -File .\install.ps1 install
+
+# 3. 组合使用 — nickcmd 选模型，CCB 让 AI 协作
+ccb up -C dpsk codex      # deepseek 模型 + Codex，Claude 随时 /cask 委派
+ccb up -C glm codex       # glm 模型 + Codex
+ccb up codex              # 默认 claude + Codex
+```
+
 ## ⚡ 核心优势
 
 | 特性 | 价值 |
