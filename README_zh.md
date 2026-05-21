@@ -193,6 +193,15 @@ ccb up codex gemini     # 同时启动两个
 ccb up codex gemini opencode  # 同时启动三个（空格分隔）
 ccb up codex,gemini,opencode  # 同时启动三个（逗号分隔）
 
+# 自定义 Claude 启动命令（通过 wrapper 脚本选择模型）
+ccb up -C dpsk codex           # 用 dpsk.ps1/cmd 启动 Claude，自动配置模型环境变量
+ccb up -C glm codex gemini     # 用 glm 脚本启动，搭配多个后端
+ccb up -C F:\pwsh_fast\dpsk.ps1 codex  # 全路径 PowerShell 脚本
+
+# 模型配置管理 — 配合 [nickcmd](https://gitlab.leihuo.netease.com/l22/nickcmd)
+# 定义命名 profile（dpsk、glm 等），一键切换模型。
+# 使用方式：ccb up -C dpsk codex  即用 dpsk profile 启动 Claude
+
 tmux 提示：CCB 的 tmux 状态栏/窗格标题主题只会在 CCB 运行期间启用。
 ccb-layout              # 启动 2x2 四 AI 布局（Codex+Gemini+OpenCode）
 ```
@@ -200,6 +209,7 @@ ccb-layout              # 启动 2x2 四 AI 布局（Codex+Gemini+OpenCode）
 ### 常用参数
 | 参数 | 说明 | 示例 |
 | :--- | :--- | :--- |
+| `-C`, `--claude-cmd` | 自定义启动 Claude 的命令/脚本（如 .ps1 wrapper 切换模型） | `ccb up -C dpsk codex` |
 | `-r` | 恢复上次会话上下文 | `ccb up codex -r` |
 | `-a` | 全自动模式，跳过权限确认 | `ccb up codex -a` |
 | `-h` | 查看详细帮助信息 | `ccb -h` |
