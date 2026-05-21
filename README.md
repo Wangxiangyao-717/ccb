@@ -201,6 +201,10 @@ ccb up -C dpsk codex           # Use dpsk.ps1/cmd to launch Claude with custom m
 ccb up -C glm codex gemini     # Use glm.ps1/cmd with multiple backends
 ccb up -C F:\pwsh_fast\dpsk.ps1 codex  # Full path to PowerShell script
 
+# Model profile management — use [nickcmd](https://gitlab.leihuo.netease.com/l22/nickcmd)
+# to define named profiles (dpsk, glm, etc.) with model-specific env vars.
+# Then: ccb up -C dpsk codex  launches Claude with the dpsk profile.
+
 tmux tip: CCB's tmux status/pane theming is enabled only while CCB is running.
 ccb-layout              # Start 2x2 layout (Codex+Gemini+OpenCode)
 ```
