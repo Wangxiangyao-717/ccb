@@ -5,9 +5,13 @@ __pycache__/
 docs/
 tests/
 .codex-session
+.codex-session-*
 .gemini-session
+.gemini-session-*
 .claude-session
+.claude-session-*
 .opencode-session
+.opencode-session-*
 opencode.json
 .claude/
 *.mp4
