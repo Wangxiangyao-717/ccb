@@ -30,6 +30,8 @@
 
 ## ⚡ 快速安装与使用
 
+> **前置依赖：** 需要安装 [WezTerm](https://wezfurlong.org/wezterm/) 终端。
+
 ```powershell
 # 1. nickcmd — 模型配置管理器，用 named profile 一键切换 Claude 模型
 git clone https://gitlab.leihuo.netease.com/l22/nickcmd.git
