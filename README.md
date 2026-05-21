@@ -34,12 +34,12 @@
 
 ```powershell
 # 1. nickcmd — 模型配置管理器，用 named profile 一键切换 Claude 模型
-git clone https://gitlab.leihuo.netease.com/l22/nickcmd.git
+git clone ssh://git@gitlab.leihuo.netease.com:32200/l22/nickcmd.git
 cd nickcmd && powershell -ExecutionPolicy Bypass -File .\install.ps1 install
 
 # 2. CCB — 让 Claude 与 Codex/Gemini/OpenCode 互相交流
 #    分屏启动多个 AI，Claude 通过 /cask /gask /oask 委派任务、请求审查
-git clone https://gitlab.leihuo.netease.com/l22/l22claude_code_bridge.git
+git clone ssh://git@gitlab.leihuo.netease.com:32200/l22/l22claude_code_bridge.git
 cd l22claude_code_bridge && powershell -ExecutionPolicy Bypass -File .\install.ps1 install
 
 # 3. 组合使用 — nickcmd 选模型，CCB 让 AI 协作
