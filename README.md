@@ -33,14 +33,17 @@
 > **前置依赖：** 需要安装 [WezTerm](https://wezfurlong.org/wezterm/) 终端。
 
 ```powershell
-# 1. nickcmd — 模型配置管理器，用 named profile 一键切换 Claude 模型
+# 1. Codex Profile Manager — 模型配置管理器，用 named profile 一键切换 Claude 模型
 git clone ssh://git@gitlab.leihuo.netease.com:32200/l22/nickcmd.git
-cd nickcmd && powershell -ExecutionPolicy Bypass -File .\install.ps1 install
+cd nickcmd
+.\install_user_path.bat    # 将 profile 命令加入 PATH（dpsk、glm 等）
 
 # 2. CCB — 让 Claude 与 Codex/Gemini/OpenCode 互相交流
 #    分屏启动多个 AI，Claude 通过 /cask /gask /oask 委派任务、请求审查
+cd ..
 git clone ssh://git@gitlab.leihuo.netease.com:32200/l22/l22claude_code_bridge.git
-cd l22claude_code_bridge && powershell -ExecutionPolicy Bypass -File .\install.ps1 install
+cd l22claude_code_bridge
+powershell -ExecutionPolicy Bypass -File .\install.ps1 install
 
 # 3. 组合使用 — nickcmd 选模型，CCB 让 AI 协作
 ccb up -C dpsk codex      # deepseek 模型 + Codex，Claude 随时 /cask 委派
