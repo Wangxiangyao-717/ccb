@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 
 from ccb_config import apply_backend_env
 from pane_registry import load_registry_by_claude_pane
-from session_utils import find_project_session_file as _find_project_session_file, safe_write_session
+from session_utils import find_project_session_file as _find_project_session_file, safe_write_session, list_session_candidates, AmbiguityError
 from terminal import get_backend_for_session
 
 apply_backend_env()
@@ -231,23 +231,82 @@ class CodexProjectSession:
             _ = err
 
 
+def _resolve_ambiguity(candidates: list[Path]) -> Optional[Path]:
+    """Phase 2 liveness probe: resolve ambiguity by checking which panes are actually alive.
+
+    Returns the single alive candidate, None if no candidates survive, or raises
+    AmbiguityError if multiple candidates are still alive.
+    """
+    if not candidates:
+        return None
+
+    first_data = _read_json(candidates[0])
+    if not first_data:
+        return None
+
+    backend = get_backend_for_session(first_data)
+    if not backend or not hasattr(backend, 'list_panes'):
+        return candidates[0]
+
+    try:
+        panes = backend.list_panes()
+    except Exception:
+        return candidates[0]
+
+    alive_pane_ids = {str(p.get("pane_id")) for p in panes}
+    alive_titles = {p.get("title", "") for p in panes}
+
+    surviving = []
+    for candidate in candidates:
+        data = _read_json(candidate)
+        if not data:
+            continue
+        pane_id = str(data.get("pane_id") or "")
+        marker = str(data.get("pane_title_marker") or "")
+        if pane_id and pane_id in alive_pane_ids:
+            surviving.append(candidate)
+        elif marker and any(marker in t for t in alive_titles):
+            surviving.append(candidate)
+
+    if len(surviving) == 1:
+        return surviving[0]
+    elif len(surviving) == 0:
+        return None
+    else:
+        raise AmbiguityError(f"Multiple alive candidates: {[p.name for p in surviving]}")
+
+
 def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None, ccb_session_id: Optional[str] = None) -> Optional[CodexProjectSession]:
     caller_pane_id = (
         str(caller_pane_id or "").strip()
         or (os.environ.get("WEZTERM_PANE") or "").strip()
         or (os.environ.get("TMUX_PANE") or "").strip()
     )
-    session = _load_registry_backed_session(work_dir, caller_pane_id, ccb_session_id)
-    if session is not None:
-        return session
+    # Registry-backed session first
+    if caller_pane_id:
+        session = _load_registry_backed_session(work_dir, caller_pane_id, ccb_session_id)
+        if session is not None:
+            return session
 
+    # Phase 1: find_project_session_file
     session_file = find_project_session_file(work_dir, caller_pane_id=caller_pane_id, session_id=ccb_session_id)
-    if not session_file:
+    if session_file:
+        data = _read_json(session_file)
+        if data:
+            return CodexProjectSession(session_file=session_file, data=data)
         return None
-    data = _read_json(session_file)
-    if not data:
-        return None
-    return CodexProjectSession(session_file=session_file, data=data)
+
+    # Phase 2: liveness probe (only when no explicit identity provided)
+    if not ccb_session_id and not caller_pane_id:
+        candidates = list_session_candidates(work_dir, ".codex-session")
+        if len(candidates) > 1:
+            resolved = _resolve_ambiguity(candidates)
+            if resolved:
+                data = _read_json(resolved)
+                if data:
+                    return CodexProjectSession(session_file=resolved, data=data)
+
+    return None
 
 
 def compute_session_key(session: CodexProjectSession) -> str:

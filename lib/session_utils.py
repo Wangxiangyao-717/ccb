@@ -11,6 +11,11 @@ from typing import Tuple, Optional, Iterable
 from pane_registry import load_registry_by_claude_pane
 
 
+class AmbiguityError(Exception):
+    """Raised when multiple active session candidates exist and cannot be resolved"""
+    pass
+
+
 def check_session_writable(session_file: Path) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Check if session file is writable

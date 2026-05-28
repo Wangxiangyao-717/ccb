@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from caskd_session import CodexProjectSession, compute_session_key, load_project_session
+from session_utils import AmbiguityError
 
 
 def test_codex_project_session_has_ccb_session_id_property(tmp_path):
@@ -76,3 +77,58 @@ def test_load_project_session_ccb_session_id_no_fallback(tmp_path, monkeypatch):
 
     session = load_project_session(tmp_path, ccb_session_id="session-B")
     assert session is None
+
+
+# --- Task 12b: Phase 2 liveness probe for ambiguity resolution ---
+
+
+def test_load_project_session_resolves_ambiguity_via_liveness_probe(tmp_path, monkeypatch):
+    monkeypatch.delenv("WEZTERM_PANE", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    (root / ".codex-session").write_text(json.dumps({
+        "session_id": "instance-A", "active": True,
+        "pane_id": "pane-A", "pane_title_marker": "CCB-Codex-A",
+    }), encoding="utf-8")
+    (root / ".codex-session-1").write_text(json.dumps({
+        "session_id": "instance-B", "active": True,
+        "pane_id": "pane-B", "pane_title_marker": "CCB-Codex-B",
+    }), encoding="utf-8")
+
+    class MockBackend:
+        def list_panes(self):
+            return [{"pane_id": "pane-B", "title": "CCB-Codex-B"}]
+
+    monkeypatch.setattr("caskd_session.get_backend_for_session", lambda data: MockBackend())
+
+    session = load_project_session(root)
+    assert session is not None
+    assert session.ccb_session_id == "instance-B"
+
+
+def test_load_project_session_raises_ambiguity_error_on_multiple_alive(tmp_path, monkeypatch):
+    monkeypatch.delenv("WEZTERM_PANE", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    (root / ".codex-session").write_text(json.dumps({
+        "session_id": "instance-A", "active": True, "pane_id": "pane-A",
+    }), encoding="utf-8")
+    (root / ".codex-session-1").write_text(json.dumps({
+        "session_id": "instance-B", "active": True, "pane_id": "pane-B",
+    }), encoding="utf-8")
+
+    class MockBackend:
+        def list_panes(self):
+            return [{"pane_id": "pane-A", "title": ""}, {"pane_id": "pane-B", "title": ""}]
+
+    monkeypatch.setattr("caskd_session.get_backend_for_session", lambda data: MockBackend())
+
+    import pytest
+    with pytest.raises(AmbiguityError):
+        load_project_session(root)
