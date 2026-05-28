@@ -221,7 +221,421 @@ git commit -m "feat(session): add ccb_session_id support to gaskd_session and oa
 
 ---
 
-## Phase 5: Daemon Layer (依赖 Phase 4)
+## Phase 4b: Ambiguity Resolution & Registry Validation (依赖 Phase 4, 5)
+
+### Task 12b: load_project_session 阶段 2 - 多候选时做 liveness probe
+
+**Files:**
+- Modify: `lib/caskd_session.py:218-234` (load_project_session 函数)
+- Test: `test/test_caskd_session_routing.py` (扩展)
+
+- [ ] **Step 1: Write failing test for phase 2 ambiguity resolution**
+
+```python
+# test/test_caskd_session_routing.py (追加)
+import json
+from caskd_session import load_project_session
+from session_utils import AmbiguityError
+
+def test_load_project_session_resolves_ambiguity_via_liveness_probe(tmp_path, monkeypatch):
+    """When multiple candidates exist, should use list_panes() to pick the alive one"""
+    root = tmp_path / "repo"
+    root.mkdir()
+    
+    # 两个活跃候选
+    session_a = root / ".codex-session"
+    session_a.write_text(json.dumps({
+        "session_id": "instance-A",
+        "active": True,
+        "pane_id": "pane-A",
+        "pane_title_marker": "CCB-Codex-A",
+    }), encoding="utf-8")
+    
+    session_b = root / ".codex-session-1"
+    session_b.write_text(json.dumps({
+        "session_id": "instance-B",
+        "active": True,
+        "pane_id": "pane-B",
+        "pane_title_marker": "CCB-Codex-B",
+    }), encoding="utf-8")
+    
+    # Mock backend.list_panes() 返回只有 pane-B 存活
+    class MockBackend:
+        def list_panes(self):
+            return [
+                {"pane_id": "pane-B", "title": "CCB-Codex-B"},
+            ]
+    
+    monkeypatch.setattr("caskd_session.get_backend_for_session", lambda data: MockBackend())
+    
+    # 没有 session_id，应该通过 liveness probe 选出 instance-B
+    session = load_project_session(root)
+    assert session is not None
+    assert session.ccb_session_id == "instance-B"
+
+def test_load_project_session_raises_ambiguity_error_on_multiple_alive(tmp_path, monkeypatch):
+    """When multiple candidates are all alive, should raise AmbiguityError"""
+    root = tmp_path / "repo"
+    root.mkdir()
+    
+    session_a = root / ".codex-session"
+    session_a.write_text(json.dumps({
+        "session_id": "instance-A",
+        "active": True,
+        "pane_id": "pane-A",
+    }), encoding="utf-8")
+    
+    session_b = root / ".codex-session-1"
+    session_b.write_text(json.dumps({
+        "session_id": "instance-B",
+        "active": True,
+        "pane_id": "pane-B",
+    }), encoding="utf-8")
+    
+    # Mock backend.list_panes() 返回两个都存活
+    class MockBackend:
+        def list_panes(self):
+            return [
+                {"pane_id": "pane-A", "title": "CCB-Codex-A"},
+                {"pane_id": "pane-B", "title": "CCB-Codex-B"},
+            ]
+    
+    monkeypatch.setattr("caskd_session.get_backend_for_session", lambda data: MockBackend())
+    
+    import pytest
+    with pytest.raises(AmbiguityError, match="Multiple alive candidates"):
+        load_project_session(root)
+
+def test_load_project_session_returns_none_on_all_stale(tmp_path, monkeypatch):
+    """When all candidates are stale (no alive panes), should return None"""
+    root = tmp_path / "repo"
+    root.mkdir()
+    
+    session_a = root / ".codex-session"
+    session_a.write_text(json.dumps({
+        "session_id": "instance-A",
+        "active": True,
+        "pane_id": "pane-A",
+    }), encoding="utf-8")
+    
+    # Mock backend.list_panes() 返回空（pane 都死了）
+    class MockBackend:
+        def list_panes(self):
+            return []
+    
+    monkeypatch.setattr("caskd_session.get_backend_for_session", lambda data: MockBackend())
+    
+    session = load_project_session(root)
+    assert session is None
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pytest test/test_caskd_session_routing.py::test_load_project_session_resolves_ambiguity_via_liveness_probe -v`
+Expected: FAIL (current implementation returns first candidate, not doing liveness probe)
+
+- [ ] **Step 3: Implement phase 2 liveness probe in load_project_session**
+
+```python
+# lib/caskd_session.py (修改 load_project_session 函数，添加阶段 2 逻辑)
+from session_utils import find_project_session_file, list_session_candidates, AmbiguityError
+from terminal import get_backend_for_session
+
+def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None, ccb_session_id: Optional[str] = None) -> Optional[CodexProjectSession]:
+    """
+    加载 Codex project session
+    
+    Args:
+        work_dir: 工作目录
+        caller_pane_id: 调用者的 pane ID（用于 registry fallback）
+        ccb_session_id: CCB session ID（用于精确匹配，优先级最高）
+    
+    Returns:
+        CodexProjectSession or None
+    
+    Raises:
+        AmbiguityError: 多个活跃候选且无法通过 liveness probe 区分时
+    """
+    # 优先尝试 registry-backed session（如果提供了 caller_pane_id）
+    if caller_pane_id:
+        session = _load_registry_backed_session(work_dir, caller_pane_id, ccb_session_id)
+        if session is not None:
+            return session
+    
+    # 使用 find_project_session_file 查找（阶段 1）
+    session_file = find_project_session_file(work_dir, caller_pane_id=caller_pane_id, session_id=ccb_session_id)
+    
+    if session_file:
+        data = _read_json(session_file)
+        if data:
+            return CodexProjectSession(session_file=session_file, data=data)
+        return None
+    
+    # 阶段 1 返回 None（歧义或无候选），尝试阶段 2 liveness probe
+    if not ccb_session_id and not caller_pane_id:
+        candidates = list_session_candidates(work_dir, ".codex-session")
+        if len(candidates) > 1:
+            # 多候选，做 liveness probe
+            resolved = _resolve_ambiguity(candidates)
+            if resolved:
+                data = _read_json(resolved)
+                if data:
+                    return CodexProjectSession(session_file=resolved, data=data)
+    
+    return None
+
+
+def _resolve_ambiguity(candidates: list[Path]) -> Optional[Path]:
+    """
+    阶段 2：pane liveness probe，从多个候选中选出唯一存活的
+    
+    Args:
+        candidates: 活跃候选文件列表
+    
+    Returns:
+        唯一存活的 session 文件，或 None（全部 stale）
+    
+    Raises:
+        AmbiguityError: 多个候选都存活
+    """
+    if not candidates:
+        return None
+    
+    # 获取 backend（用第一个候选的 data）
+    first_data = _read_json(candidates[0])
+    if not first_data:
+        return None
+    
+    backend = get_backend_for_session(first_data)
+    if not backend or not hasattr(backend, 'list_panes'):
+        # backend 不支持 list_panes，无法做 probe，返回第一个（保持向后兼容）
+        return candidates[0]
+    
+    try:
+        panes = backend.list_panes()
+    except Exception:
+        return candidates[0]  # probe 失败，fallback 到第一个
+    
+    alive_pane_ids = {str(p.get("pane_id")) for p in panes}
+    alive_titles = {p.get("title", "") for p in panes}
+    
+    surviving = []
+    for candidate in candidates:
+        data = _read_json(candidate)
+        if not data:
+            continue
+        pane_id = str(data.get("pane_id") or "")
+        marker = str(data.get("pane_title_marker") or "")
+        if pane_id and pane_id in alive_pane_ids:
+            surviving.append(candidate)
+        elif marker and any(marker in t for t in alive_titles):
+            surviving.append(candidate)
+    
+    if len(surviving) == 1:
+        return surviving[0]
+    elif len(surviving) == 0:
+        return None  # all stale
+    else:
+        raise AmbiguityError(f"Multiple alive candidates: {[p.name for p in surviving]}")
+```
+
+- [ ] **Step 4: Add AmbiguityError to session_utils.py**
+
+```python
+# lib/session_utils.py (在文件开头添加)
+class AmbiguityError(Exception):
+    """Raised when multiple active session candidates exist and cannot be resolved"""
+    pass
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `pytest test/test_caskd_session_routing.py -v`
+Expected: All tests PASS
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add lib/session_utils.py lib/caskd_session.py test/test_caskd_session_routing.py
+git commit -m "feat(caskd_session): implement phase 2 liveness probe for ambiguity resolution"
+```
+
+### Task 12c: registry fallback stale 校验和 provider 级清理
+
+**Files:**
+- Modify: `lib/caskd_session.py:45-95` (_load_registry_backed_session 函数)
+- Test: `test/test_caskd_session_routing.py` (扩展)
+
+- [ ] **Step 1: Write failing test for registry fallback validation and cleanup**
+
+```python
+# test/test_caskd_session_routing.py (追加)
+import json
+from pathlib import Path
+from caskd_session import _load_registry_backed_session
+from pane_registry import upsert_registry, load_registry_by_session_id
+
+def test_registry_fallback_validates_and_cleans_stale(tmp_path, monkeypatch):
+    """Registry fallback should validate session and clean stale provider fields"""
+    monkeypatch.setattr("pane_registry._registry_dir", lambda: tmp_path)
+    
+    root = tmp_path / "repo"
+    root.mkdir()
+    
+    # 创建 session 文件，但标记为 inactive
+    session_file = root / ".codex-session"
+    session_file.write_text(json.dumps({
+        "session_id": "stale-session",
+        "active": False,  # inactive
+        "pane_id": "dead-pane",
+    }), encoding="utf-8")
+    
+    # 创建 registry，指向这个 stale session
+    upsert_registry({
+        "ccb_session_id": "stale-session",
+        "claude_pane_id": "claude-pane-1",
+        "codex_pane_id": "dead-pane",
+        "codex_runtime_dir": str(root),
+        "work_dir": str(root),
+    })
+    
+    # registry fallback 应该检测到 stale，清理 codex 字段，返回 None
+    result = _load_registry_backed_session(root, "claude-pane-1")
+    assert result is None
+    
+    # 验证 codex 字段被清理，但 claude_pane_id 保留
+    registry = load_registry_by_session_id("stale-session")
+    assert registry is not None
+    assert "codex_pane_id" not in registry
+    assert "codex_runtime_dir" not in registry
+    assert registry["claude_pane_id"] == "claude-pane-1"
+
+def test_registry_fallback_validates_work_dir_consistency(tmp_path, monkeypatch):
+    """Registry fallback should reject if work_dir doesn't match"""
+    monkeypatch.setattr("pane_registry._registry_dir", lambda: tmp_path)
+    
+    root = tmp_path / "repo"
+    root.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    
+    session_file = root / ".codex-session"
+    session_file.write_text(json.dumps({
+        "session_id": "session-X",
+        "active": True,
+    }), encoding="utf-8")
+    
+    upsert_registry({
+        "ccb_session_id": "session-X",
+        "claude_pane_id": "claude-pane-1",
+        "work_dir": str(other),  # 不同的 work_dir
+    })
+    
+    # work_dir 不一致，应该返回 None
+    result = _load_registry_backed_session(root, "claude-pane-1")
+    assert result is None
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pytest test/test_caskd_session_routing.py::test_registry_fallback_validates_and_cleans_stale -v`
+Expected: FAIL (current implementation doesn't validate or clean stale registry)
+
+- [ ] **Step 3: Implement validation and cleanup in _load_registry_backed_session**
+
+```python
+# lib/caskd_session.py (修改 _load_registry_backed_session 函数)
+from pane_registry import clear_provider_registry_fields
+
+def _load_registry_backed_session(work_dir: Path, caller_pane_id: Optional[str], expected_ccb_session_id: Optional[str] = None) -> Optional["CodexProjectSession"]:
+    """
+    从 registry 加载 session
+    
+    如果提供了 expected_ccb_session_id，会验证 registry 中的 ccb_session_id 是否匹配
+    """
+    pane_id = str(caller_pane_id or "").strip()
+    if not pane_id:
+        return None
+
+    record = load_registry_by_claude_pane(pane_id)
+    if not isinstance(record, dict):
+        return None
+
+    # 验证 ccb_session_id（如果提供了）
+    if expected_ccb_session_id:
+        registry_ccb_session_id = str(record.get("ccb_session_id") or "").strip()
+        if registry_ccb_session_id != expected_ccb_session_id:
+            return None  # 不匹配，返回 None
+
+    expected_work_dir = _normalize_work_dir(work_dir)
+    record_work_dir = _normalize_work_dir(record.get("work_dir_norm") or record.get("work_dir") or "")
+    if expected_work_dir and record_work_dir and expected_work_dir != record_work_dir:
+        return None
+
+    # 获取 ccb_session_id 和 session 文件
+    ccb_session_id = str(record.get("ccb_session_id") or "").strip()
+    if not ccb_session_id:
+        return None
+
+    session_file = find_project_session_file(work_dir, ".codex-session", session_id=ccb_session_id)
+    if not session_file or not session_file.exists():
+        return None
+
+    # 验证 session 文件状态
+    data = _read_json(session_file)
+    if not data:
+        return None
+    
+    if data.get("active") is False or data.get("ended_at"):
+        # session 已 stale，清理 registry 中的 codex 字段
+        clear_provider_registry_fields(ccb_session_id, "codex")
+        return None
+
+    runtime_dir = str(record.get("codex_runtime_dir") or "").strip()
+    codex_pane_id = str(record.get("codex_pane_id") or "").strip()
+    terminal = str(record.get("codex_terminal") or record.get("terminal") or "").strip()
+    if not runtime_dir or not codex_pane_id or not terminal:
+        return None
+
+    session_data = {
+        "session_id": ccb_session_id,
+        "runtime_dir": runtime_dir,
+        "terminal": terminal,
+        "tmux_session": record.get("codex_tmux_session"),
+        "pane_id": codex_pane_id,
+        "pane_title_marker": str(record.get("codex_pane_title_marker") or "").strip(),
+        "work_dir": str(record.get("work_dir") or work_dir),
+        "work_dir_norm": str(record.get("work_dir_norm") or expected_work_dir),
+        "active": True,
+    }
+    codex_start_cmd = str(record.get("codex_start_cmd") or "").strip()
+    if codex_start_cmd:
+        session_data["codex_start_cmd"] = codex_start_cmd
+        session_data["start_cmd"] = codex_start_cmd
+    codex_session_path = str(record.get("codex_session_path") or "").strip()
+    if codex_session_path:
+        session_data["codex_session_path"] = codex_session_path
+    codex_session_id = str(record.get("codex_session_id") or "").strip()
+    if codex_session_id:
+        session_data["codex_session_id"] = codex_session_id
+    return CodexProjectSession(session_file=session_file, data=session_data)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `pytest test/test_caskd_session_routing.py -v`
+Expected: All tests PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add lib/caskd_session.py test/test_caskd_session_routing.py
+git commit -m "feat(caskd_session): add stale validation and cleanup in registry fallback"
+```
+
+---
+
+## Phase 5: Daemon Layer (依赖 Phase 4, 4b)
 
 ### Task 14: caskd_daemon - 提取 ccb_session_id 传给 session loading
 
