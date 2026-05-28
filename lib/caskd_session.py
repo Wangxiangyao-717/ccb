@@ -101,6 +101,16 @@ class CodexProjectSession:
     data: dict
 
     @property
+    def ccb_session_id(self) -> str:
+        """CCB launcher session ID. Prefers ccb_session_id field, falls back to session_id for backward compat.
+        This is NOT the Codex native session ID (codex_session_id)."""
+        value = self.data.get("ccb_session_id")
+        if value:
+            return str(value).strip()
+        value = self.data.get("session_id")
+        return str(value or "").strip()
+
+    @property
     def terminal(self) -> str:
         return (self.data.get("terminal") or "tmux").strip() or "tmux"
 
