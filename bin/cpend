@@ -54,14 +54,18 @@ def _load_session_log_path() -> tuple[Path | None, str | None]:
 
 
 def _load_registry_log_path() -> tuple[Path | None, dict | None]:
-    session_id = (os.environ.get("CODEX_SESSION_ID") or "").strip()
+    session_id = (
+        os.environ.get("CCB_SESSION_ID") or
+        os.environ.get("CODEX_SESSION_ID") or
+        ""
+    ).strip()
     if session_id:
         record = load_registry_by_session_id(session_id)
         if record:
             path_str = record.get("codex_session_path")
             if path_str:
                 path = Path(path_str).expanduser()
-                _debug(f"Using registry by CODEX_SESSION_ID: {path}")
+                _debug(f"Using registry by session_id: {path}")
                 return path, record
 
     pane_id = (os.environ.get("WEZTERM_PANE") or "").strip()
