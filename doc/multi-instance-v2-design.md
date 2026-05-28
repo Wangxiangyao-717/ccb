@@ -87,7 +87,7 @@ else:
       按 session 文件过滤 active=true && 无 ended_at
       0 个 → 继续向父目录查找 / 最终报 no active session
       1 个 → 直接用
-      >1 个 → 返回 candidates 列表，交给上层做阶段 2
+      >1 个 → find_project_session_file() 返回 None，上层 load_project_session() 调用 list_session_candidates() 做阶段 2
     阶段 2（pane liveness probe，在 provider-specific load_project_session 层完成）：
       调用 backend.list_panes() 拿全量 pane snapshot（backend-agnostic）
       - WezTerm: wezterm cli list --format json
