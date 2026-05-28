@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from ccb_config import apply_backend_env
-from pane_registry import load_registry_by_claude_pane
+from pane_registry import load_registry_by_claude_pane, clear_provider_registry_fields
 from session_utils import find_project_session_file as _find_project_session_file, safe_write_session, list_session_candidates, AmbiguityError
 from terminal import get_backend_for_session
 
@@ -62,23 +62,36 @@ def _load_registry_backed_session(work_dir: Path, caller_pane_id: Optional[str],
     if expected_work_dir and record_work_dir and expected_work_dir != record_work_dir:
         return None
 
+    ccb_session_id = str(record.get("ccb_session_id") or "").strip()
+
+    # Find session file (resolve early for stale validation)
+    session_file = (
+        _find_project_session_file(
+            work_dir,
+            ".codex-session",
+            caller_pane_id=pane_id,
+            session_id=ccb_session_id or None,
+        )
+        or (Path(work_dir).resolve() / ".codex-session")
+    )
+
+    # Validate session file is not stale
+    if session_file.exists():
+        file_data = _read_json(session_file)
+        if file_data and (file_data.get("active") is False or file_data.get("ended_at")):
+            # Session is stale, clean codex fields from registry
+            if ccb_session_id:
+                clear_provider_registry_fields(ccb_session_id, "codex")
+            return None
+
     runtime_dir = str(record.get("codex_runtime_dir") or "").strip()
     codex_pane_id = str(record.get("codex_pane_id") or "").strip()
     terminal = str(record.get("codex_terminal") or record.get("terminal") or "").strip()
     if not runtime_dir or not codex_pane_id or not terminal:
         return None
 
-    session_file = (
-        _find_project_session_file(
-            work_dir,
-            ".codex-session",
-            caller_pane_id=pane_id,
-            session_id=str(record.get("ccb_session_id") or "").strip() or None,
-        )
-        or (Path(work_dir).resolve() / ".codex-session")
-    )
     data = {
-        "session_id": str(record.get("ccb_session_id") or "").strip(),
+        "session_id": ccb_session_id,
         "runtime_dir": runtime_dir,
         "terminal": terminal,
         "tmux_session": record.get("codex_tmux_session"),

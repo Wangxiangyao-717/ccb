@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
-from caskd_session import CodexProjectSession, compute_session_key, load_project_session
+from caskd_session import CodexProjectSession, compute_session_key, load_project_session, _load_registry_backed_session
 from session_utils import AmbiguityError
+from pane_registry import upsert_registry, load_registry_by_session_id
 
 
 def test_codex_project_session_has_ccb_session_id_property(tmp_path):
@@ -132,3 +133,38 @@ def test_load_project_session_raises_ambiguity_error_on_multiple_alive(tmp_path,
     import pytest
     with pytest.raises(AmbiguityError):
         load_project_session(root)
+
+
+# --- Task 12c: Registry fallback stale validation and cleanup ---
+
+
+def test_registry_fallback_validates_and_cleans_stale(tmp_path, monkeypatch):
+    monkeypatch.setattr("pane_registry._registry_dir", lambda: tmp_path)
+    monkeypatch.setattr("caskd_session.load_registry_by_claude_pane",
+                        lambda pane_id: __import__("pane_registry").load_registry_by_claude_pane(pane_id))
+
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    session_file = root / ".codex-session"
+    session_file.write_text(json.dumps({
+        "session_id": "stale-session", "active": False, "pane_id": "dead-pane",
+    }), encoding="utf-8")
+
+    upsert_registry({
+        "ccb_session_id": "stale-session",
+        "claude_pane_id": "claude-pane-1",
+        "codex_pane_id": "dead-pane",
+        "codex_runtime_dir": str(root),
+        "codex_terminal": "tmux",
+        "work_dir": str(root),
+    })
+
+    result = _load_registry_backed_session(root, "claude-pane-1")
+    assert result is None
+
+    registry = load_registry_by_session_id("stale-session")
+    assert registry is not None
+    assert "codex_pane_id" not in registry
+    assert "codex_runtime_dir" not in registry
+    assert registry["claude_pane_id"] == "claude-pane-1"
