@@ -42,7 +42,10 @@ def test_cask_daemon_required_no_state(tmp_path: Path) -> None:
     env.pop("CCB_CASKD_STATE_FILE", None)
     proc = _run("cask", ["hello"], cwd=tmp_path, env=env)
     assert proc.returncode == 1
-    assert "daemon required" in proc.stderr.lower()
+    # After multi-instance routing: empty session file is treated as inactive
+    # (active != true), so either "daemon required" or "no active session" is valid
+    err = proc.stderr.lower()
+    assert "daemon required" in err or "no active" in err
 
 
 def test_gask_daemon_disabled_env(tmp_path: Path) -> None:
