@@ -27,6 +27,7 @@ from askd_client import (
     maybe_start_daemon,
     wait_for_daemon_ready,
     check_background_mode,
+    _read_ccb_session_id,
 )
 from providers import OASK_CLIENT_SPEC
 
@@ -48,7 +49,18 @@ def _daemon_request_with_retries(work_dir: Path, message: str, timeout: float, q
     # If daemon mode is disabled or no session, don't spin.
     if not env_bool(OASK_CLIENT_SPEC.enabled_env, True):
         return None
-    if not find_project_session_file(work_dir, OASK_CLIENT_SPEC.session_filename):
+    _caller_pane = (
+        (os.environ.get("WEZTERM_PANE") or "").strip()
+        or (os.environ.get("TMUX_PANE") or "").strip()
+        or None
+    )
+    _ccb_sid = _read_ccb_session_id(OASK_CLIENT_SPEC)
+    if not find_project_session_file(
+        work_dir,
+        OASK_CLIENT_SPEC.session_filename,
+        caller_pane_id=_caller_pane,
+        session_id=_ccb_sid,
+    ):
         return None
 
     # Stale state files can block daemon mode (e.g. daemon exited/crashed but the json remains).
@@ -179,7 +191,18 @@ def main(argv: list[str]) -> int:
         if not env_bool(OASK_CLIENT_SPEC.enabled_env, True):
             print(f"[ERROR] {OASK_CLIENT_SPEC.enabled_env}=0: oask daemon mode disabled.", file=sys.stderr)
             return EXIT_ERROR
-        if not find_project_session_file(Path.cwd(), OASK_CLIENT_SPEC.session_filename):
+        _caller_pane = (
+            (os.environ.get("WEZTERM_PANE") or "").strip()
+            or (os.environ.get("TMUX_PANE") or "").strip()
+            or None
+        )
+        _ccb_sid = _read_ccb_session_id(OASK_CLIENT_SPEC)
+        if not find_project_session_file(
+            Path.cwd(),
+            OASK_CLIENT_SPEC.session_filename,
+            caller_pane_id=_caller_pane,
+            session_id=_ccb_sid,
+        ):
             print("[ERROR] No active OpenCode session found for this directory.", file=sys.stderr)
             print("Run `ccb up opencode` in this project first.", file=sys.stderr)
             return EXIT_ERROR
