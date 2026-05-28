@@ -29,43 +29,102 @@ CCB 在同一项目目录下同时启动多个 `ccb up` 实例时，会出现：
 
 ## 第 1 节：路由机制
 
-### 客户端环境变量优先级
+### 客户端环境变量优先级（按 provider 区分）
 
-```
-CCB_SESSION_ID        ← 新增 canonical，ccb up 注入
-CODEX_SESSION_ID      ← 已有，兼容别名
-caller_pane_id        ← 已有，降级为 fallback
+`askd_client.py` 是共享层，不同 provider 的兼容别名不同：
+
+| 优先级 | 通用名 | Codex 兼容别名 | Gemini 兼容别名 | OpenCode 兼容别名 |
+|--------|--------|----------------|-----------------|-------------------|
+| 1 (canonical) | `CCB_SESSION_ID` | `CCB_SESSION_ID` | `CCB_SESSION_ID` | `CCB_SESSION_ID` |
+| 2 (legacy alias) | — | `CODEX_SESSION_ID` | `GEMINI_SESSION_ID` | `OPENCODE_SESSION_ID` |
+| 3 (fallback) | `caller_pane_id` | `caller_pane_id` | `caller_pane_id` | `caller_pane_id` |
+
+客户端读取逻辑（`askd_client.py` 中，按 provider spec 选择对应的 legacy env）：
+
+```python
+ccb_session_id = (
+    os.environ.get("CCB_SESSION_ID") or
+    os.environ.get(spec.legacy_session_env) or  # CODEX/GEMINI/OPENCODE_SESSION_ID
+    ""
+).strip() or None
 ```
 
-如果 `CCB_SESSION_ID` 和 `CODEX_SESSION_ID` 都存在但值不同，输出警告并使用 `CCB_SESSION_ID`。
+`ProviderClientSpec` 需新增 `legacy_session_env` 字段：
+- `CASK_CLIENT_SPEC.legacy_session_env = "CODEX_SESSION_ID"`
+- `GASK_CLIENT_SPEC.legacy_session_env = "GEMINI_SESSION_ID"`
+- `OASK_CLIENT_SPEC.legacy_session_env = "OPENCODE_SESSION_ID"`
+
+如果 `CCB_SESSION_ID` 和 legacy alias 都存在但值不同，输出警告并使用 `CCB_SESSION_ID`。
+
+### 父目录查找保留
+
+保留现有 `find_project_session_file()` 的"从 cwd 向父目录逐级查找"语义。用户在项目子目录中运行 `cask` 时仍能正确找到 session 文件。每一层目录都做同样的路由判断（精确匹配 → fallback → 两阶段扫描），某一层找到唯一匹配即返回。
+
+### 精确匹配语义
+
+"精确匹配 `ccb_session_id`"是指匹配 session 文件中的 **CCB launcher session id**（即 `data["session_id"]` 字段），**绝不匹配 agent 自身的 native session id**（`codex_session_id` / `gemini_session_id` / `opencode_session_id`）。
+
+兼容旧 session 文件：如果 session 文件中没有 `ccb_session_id` 字段，回退匹配 `session_id` 字段（旧格式里两者值相同）。
 
 ### Daemon 路由逻辑
 
 ```
 if ccb_session_id 存在:
-    精确匹配 session 文件中的 session_id
+    精确匹配 session 文件中的 ccb_session_id（不匹配 native session id）
     匹配不到 → 直接报错（禁止 fallback）
 
 elif caller_pane_id 存在:
     registry 查 ccb_session_id → 精确匹配 session 文件
-    匹配到后校验：session 文件存在 + active=true + 无 ended_at
-    校验失败 → 清理该 provider 相关的 registry 字段，视为 miss
+    匹配到后校验：
+      1. session 文件存在
+      2. active=true && 无 ended_at
+      3. registry 中的 work_dir_norm 和当前请求 work_dir 一致（防止跨项目误路由）
+    校验失败 → clear_provider_registry_fields()（仅清理该 provider 的字段），视为 miss
 
 else:
-    两阶段扫描：
-    阶段 1（轻量）：按 session 文件过滤 active=true && 无 ended_at
-      0 个 → 报 no active session
+    两阶段扫描（在当前目录及父目录逐级查找，每层执行）：
+    阶段 1（轻量，在 session_utils 中完成）：
+      按 session 文件过滤 active=true && 无 ended_at
+      0 个 → 继续向父目录查找 / 最终报 no active session
       1 个 → 直接用
-      >1 个 → 进入阶段 2
-    阶段 2（pane liveness probe）：
-      一次 wezterm cli list 拿全量 pane snapshot，内存匹配候选的 pane_id/marker
-      剔除 pane 已死的僵尸候选
+      >1 个 → 返回 candidates 列表，交给上层做阶段 2
+    阶段 2（pane liveness probe，在 provider-specific load_project_session 层完成）：
+      调用 backend.list_panes() 拿全量 pane snapshot（backend-agnostic）
+      - WezTerm: wezterm cli list --format json
+      - iTerm2: osascript list panes
+      - tmux: tmux list-panes -a
+      内存匹配候选的 pane_id/marker，剔除 pane 已死的僵尸候选
       剩 0 个 → 报 all candidates stale
       剩 1 个 → 用它
       仍 >1 个 → 报 ambiguity error
 ```
 
-注意：阶段 2 的 pane 存活校验不放在 `session_utils.py`（纯文件工具），而是放在 provider-specific 的 `load_project_session()` 层，或给 `find_project_session_file()` 注入 validator callback。
+### session_utils 与上层的职责边界
+
+```python
+# session_utils.py 负责阶段 1（纯文件操作，不依赖 terminal backend）
+def find_project_session_file(
+    work_dir: Path,
+    session_filename: str,
+    *,
+    session_id: str | None = None,
+    caller_pane_id: str | None = None,
+) -> Optional[Path]:
+    """
+    返回值语义：
+    - Path: 唯一确定的 session 文件（精确匹配或阶段 1 单候选）
+    - None: 无候选（no active session）
+    如果阶段 1 有多个候选，不在此函数处理，
+    由上层 load_project_session() 做阶段 2 liveness probe。
+    """
+```
+
+当阶段 1 有多个候选时，`find_project_session_file()` 的行为：
+- 如果有 `session_id`：精确匹配，匹配到返回 Path，匹配不到返回 None
+- 如果有 `caller_pane_id`：通过 registry 间接匹配，成功返回 Path，失败返回 None
+- 都没有：如果只有 1 个候选返回 Path；如果多个候选返回 None（上层需自行处理 ambiguity）
+
+上层 `load_project_session()` 拿到 None 时，自行调用 `list_candidates()` + backend liveness probe 做阶段 2。
 
 ---
 
@@ -142,10 +201,12 @@ gaskd_daemon.py、oaskd_daemon.py 同理。
 
 ```python
 # ccb - _start_provider_wezterm() / _start_provider_iterm2() / tmux 路径
-short_id = self.session_id.rsplit("-", 1)[-1]  # 取 PID 部分
-pane_title_marker = f"CCB-{provider.capitalize()}-{short_id}"
-# 例如: CCB-Codex-12345
+# 使用完整 ccb_session_id（格式 ai-<epoch>-<pid>），保证稳定唯一
+pane_title_marker = f"CCB-{provider.capitalize()}-{self.session_id}"
+# 例如: CCB-Codex-ai-1716890000-12345
 ```
+
+不使用 PID 后缀（PID 可复用，不是稳定唯一身份）。`ccb_session_id` 本身包含 epoch + PID，碰撞概率极低。
 
 ### compute_session_key() 改为优先 ccb_session_id
 
@@ -172,17 +233,21 @@ def compute_session_key(session) -> str:
 
 ## 第 4 节：Registry 清理
 
-### 核心约束：Registry 是 session 级资源
+### Registry 操作术语
 
-registry 文件是"每个 CCB 实例一个文件"（按 `ccb_session_id`），不是"每个 provider 一个"。`ccb kill codex` 只杀 Codex provider，不能删整个 registry（会误伤同 session 下的 Gemini/OpenCode）。
+Registry 有两种操作，必须严格区分：
+- **clear_provider_registry_fields()**：清理 registry 文件中某个 provider 的字段（如 `codex_pane_id` / `codex_runtime_dir`），保留其他 provider 的字段。用于 provider 级操作（如 `ccb kill codex`）。
+- **remove_registry(session_id)**：删除整个 registry 文件。仅用于 session 级操作（如 `cleanup()`、所有 provider 都已 inactive 时）。
+
+不使用"provider 级 registry 清理"这种中间表述。
 
 ### cmd_kill 改造
 
 ```python
 # ccb kill 找到 session 文件后：
 # 1. 标该 provider 的 session 文件为 active=false
-# 2. 不删 registry（除非该 ccb_session_id 下所有 provider 都已 inactive）
-# 3. 检查同 session 下其他 provider 是否仍活跃
+# 2. clear_provider_registry_fields(provider)（清理该 provider 的字段，不动其他 provider）
+# 3. 检查同 session 下其他 provider 是否仍活跃（扫描 session 文件）
 # 4. 全部 inactive 时才 remove_registry(session_id)
 ```
 
@@ -192,7 +257,7 @@ cmd_kill 找 session 文件时目前只传 `caller_pane_id`。改为也按 `CCB_
 
 ### Fallback 校验中的 registry 清理
 
-cask 通过 registry fallback 发现 codex pane 死了时，不能删整个 registry。改为清理 registry 中 `codex_*` 相关字段（codex_pane_id / codex_runtime_dir 等），保留其他 provider 的字段。
+cask 通过 registry fallback 发现 codex pane 死了时，不能删整个 registry。改为 `clear_provider_registry_fields("codex")`（清理 registry 中 `codex_*` 相关字段：codex_pane_id / codex_runtime_dir / codex_input_fifo 等），保留其他 provider 的字段和 `claude_pane_id`。
 
 ### 异常退出
 
@@ -231,8 +296,10 @@ session_file = find_project_session_file(work_dir, ".codex-session",
 ```python
 # ccb - _start_claude()
 env["CCB_SESSION_ID"] = self.session_id
-# 保留已有的：
-env["CODEX_SESSION_ID"] = self.session_id  # 兼容别名
+# 保留已有的（兼容别名）：
+env["CODEX_SESSION_ID"] = self.session_id
+env["GEMINI_SESSION_ID"] = self.session_id
+env["OPENCODE_SESSION_ID"] = self.session_id
 ```
 
 Claude 子进程继承这些环境变量。Claude 内部通过 Bash tool 调用 cask/gask/oask/cpend 时，环境变量会自动传递到子进程。
@@ -246,9 +313,10 @@ Claude 子进程继承这些环境变量。Claude 内部通过 Bash tool 调用 
 | `lib/ccb_protocol.py` | CaskdRequest 加 `ccb_session_id` 字段 |
 | `lib/gaskd_protocol.py` | GaskdRequest 加 `ccb_session_id` 字段 |
 | `lib/oaskd_protocol.py` | OaskdRequest 加 `ccb_session_id` 字段 |
-| `lib/askd_client.py` | 读 `CCB_SESSION_ID` env，payload 带 `ccb_session_id`，预检查用同一身份精确匹配 |
-| `ccb` | 注入 `CCB_SESSION_ID` env，`pane_title_marker` 唯一化，`cmd_kill` 同步路由 + provider 级 registry 清理 |
-| `lib/session_utils.py` | `find_project_session_file` 加 `session_id` 参数，精确匹配 + 校验，ambiguity 两阶段过滤（阶段 2 不在此文件，通过 callback 或上层处理） |
+| `lib/askd_client.py` | 读 `CCB_SESSION_ID` env + provider-specific legacy alias，payload 带 `ccb_session_id`，预检查用同一身份精确匹配 |
+| `lib/providers.py` | `ProviderClientSpec` 新增 `legacy_session_env` 字段 |
+| `ccb` | 注入 `CCB_SESSION_ID` env，`pane_title_marker` 唯一化（使用完整 session_id），`cmd_kill` 同步路由 + `clear_provider_registry_fields()` / 条件 `remove_registry()` |
+| `lib/session_utils.py` | `find_project_session_file` 的匹配和 fallback 语义改造（签名已有 `session_id` 参数，无需新增），新增 `list_session_candidates()` 供上层阶段 2 使用，保留父目录查找语义 |
 | `lib/caskd_session.py` | `compute_session_key` 优先 `ccb_session_id`，加 `ccb_session_id` property，`load_project_session` 加 `ccb_session_id` 参数 |
 | `lib/gaskd_session.py` | 同上 |
 | `lib/oaskd_session.py` | 同上 |
@@ -264,8 +332,8 @@ Claude 子进程继承这些环境变量。Claude 内部通过 Bash tool 调用 
 ## 向后兼容
 
 - 单实例场景：无 `CCB_SESSION_ID` 时走 `caller_pane_id -> 单候选 fallback`，行为和现在完全一致
-- 旧 Claude 环境：`CODEX_SESSION_ID` 保留为兼容别名
-- 旧 daemon：新客户端发 `ccb_session_id`，旧 daemon 忽略未知字段（JSON payload），自动降级到旧路由
+- 旧 Claude 环境：`CODEX_SESSION_ID` / `GEMINI_SESSION_ID` / `OPENCODE_SESSION_ID` 保留为兼容别名
+- 混合版本部署：新客户端发 `ccb_session_id`，旧 daemon 忽略未知字段（wire-compatible），单实例场景仍可工作。但**多实例可靠路由要求客户端和 daemon 同步升级**，否则旧 daemon 仍走 `candidates[0]` fallback，多实例会误投
 
 ## 不在本次范围
 
