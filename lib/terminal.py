@@ -523,6 +523,28 @@ class TmuxBackend(TerminalBackend):
             self.respawn_pane(pane_id, cmd=cmd, cwd=cwd)
         return pane_id
 
+    def list_panes(self) -> list[dict]:
+        try:
+            result = _run(
+                [*self._tmux_base(), "list-panes", "-a", "-F", "#{pane_id}\t#{pane_title}"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            if result.returncode != 0:
+                return []
+            panes = []
+            for line in result.stdout.strip().split("\n"):
+                if not line:
+                    continue
+                parts = line.split("\t", 1)
+                if len(parts) >= 1:
+                    panes.append({
+                        "pane_id": parts[0],
+                        "title": parts[1] if len(parts) > 1 else "",
+                    })
+            return panes
+        except Exception:
+            return []
+
 
 class Iterm2Backend(TerminalBackend):
     """Minimal placeholder for iTerm2 backend compatibility."""
@@ -536,6 +558,9 @@ class Iterm2Backend(TerminalBackend):
         pass
     def create_pane(self, cmd: str, cwd: str, direction: str = "right", percent: int = 50, parent_pane: Optional[str] = None) -> str:
         raise NotImplementedError("iTerm2 backend not implemented")
+    def list_panes(self) -> list[dict]:
+        # iTerm2 pane listing is complex; return empty for now
+        return []
 
 
 class WeztermBackend(TerminalBackend):
