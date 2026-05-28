@@ -536,7 +536,7 @@ class AILauncher:
                 except StopIteration:
                     parent_pane = None
 
-        pane_title_marker = f"CCB-{provider.capitalize()}"
+        pane_title_marker = f"CCB-{provider.capitalize()}-{self.session_id}"
         title_cmd = _build_pane_title_cmd(pane_title_marker)
         full_cmd = title_cmd + _build_export_path_cmd(self.script_dir / "bin") + start_cmd
         backend = WeztermBackend()
@@ -958,7 +958,7 @@ class AILauncher:
             os.mkfifo(output_fifo, 0o644)
 
         start_cmd = _build_export_path_cmd(self.script_dir / "bin") + self._build_codex_start_cmd()
-        pane_title_marker = "CCB-Codex"
+        pane_title_marker = f"CCB-Codex-{self.session_id}"
 
         backend = TmuxBackend()
 
@@ -1045,7 +1045,7 @@ class AILauncher:
         runtime.mkdir(parents=True, exist_ok=True)
 
         start_cmd = _build_export_path_cmd(self.script_dir / "bin") + self._build_gemini_start_cmd()
-        pane_title_marker = "CCB-Gemini"
+        pane_title_marker = f"CCB-Gemini-{self.session_id}"
 
         backend = TmuxBackend()
 
@@ -1093,7 +1093,7 @@ class AILauncher:
         runtime.mkdir(parents=True, exist_ok=True)
 
         start_cmd = _build_export_path_cmd(self.script_dir / "bin") + self._build_opencode_start_cmd()
-        pane_title_marker = "CCB-OpenCode"
+        pane_title_marker = f"CCB-OpenCode-{self.session_id}"
 
         backend = TmuxBackend()
 
