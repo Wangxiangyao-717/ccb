@@ -422,3 +422,33 @@ Claude 子进程继承这些环境变量。Claude 内部通过 Bash tool 调用 
 - Gemini/OpenCode 的 caller_pane_id fallback 路由（仅 Codex 支持）
 - Registry TTL 缩短（当前 7 天，可通过校验层兜底）
 - Slot 编号机制（已用 ccb_session_id 替代，不再需要 slot 概念）
+
+## Implementation Notes
+
+### Implementation Date
+2026-05-28
+
+### Key Changes
+1. **Protocol Layer**: Added `ccb_session_id` field to CaskdRequest/GaskdRequest/OaskdRequest
+2. **Core Routing**: Rewrote `find_project_session_file` to use precise matching (no fallback to candidates[0])
+3. **Session Loading**: Added `ccb_session_id` parameter to `load_project_session` for all providers
+4. **Daemon Layer**: Daemons extract and pass `ccb_session_id` to session loading
+5. **Client Layer**: Tools read `CCB_SESSION_ID` env (primary) with fallback to legacy vars
+6. **Registry**: Added `clear_provider_registry_fields()` for provider-level cleanup
+7. **Terminal**: Added `list_panes()` abstract method to TerminalBackend
+8. **Main Script**: Inject `CCB_SESSION_ID` env, unique `pane_title_marker`, precise routing in `cmd_kill`
+
+### Test Coverage
+- `test/test_session_utils.py`: Core routing logic tests
+- `test/test_pane_registry.py`: Registry cleanup tests
+- `test/test_terminal_list_panes.py`: list_panes interface tests
+- `test/test_caskd_session_routing.py`: Session loading tests
+- `test/test_gaskd_session_routing.py`: Gemini session tests
+- `test/test_oaskd_session_routing.py`: OpenCode session tests
+- `test/test_askd_client.py`: Client helper tests
+- `test/test_integration_multi_instance.py`: End-to-end integration tests
+
+### Backward Compatibility
+- Single-instance scenarios: fully compatible (no behavior change)
+- Old daemons: wire-compatible but unreliable for multi-instance (must upgrade together)
+- Environment variables: `CCB_SESSION_ID` is canonical, legacy vars still work as fallback
