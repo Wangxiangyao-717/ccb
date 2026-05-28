@@ -124,7 +124,72 @@ def find_project_session_file(
 - 如果有 `caller_pane_id`：通过 registry 间接匹配，成功返回 Path，失败返回 None
 - 都没有：如果只有 1 个候选返回 Path；如果多个候选返回 None（上层需自行处理 ambiguity）
 
-上层 `load_project_session()` 拿到 None 时，自行调用 `list_candidates()` + backend liveness probe 做阶段 2。
+上层 `load_project_session()` 拿到 None 时，自行调用 `list_session_candidates()` + backend liveness probe 做阶段 2。
+
+### 阶段 2 接口契约
+
+**`session_utils.list_session_candidates()`**：
+
+```python
+def list_session_candidates(
+    work_dir: Path,
+    session_filename: str,
+) -> list[Path]:
+    """
+    返回当前目录及所有父目录中的活跃候选 session 文件列表。
+    仅做轻量过滤：active=true && 无 ended_at。
+    按目录从近到远排序，同目录内按编号排序。
+    用于上层 load_project_session() 做阶段 2 liveness probe。
+    """
+```
+
+与 `find_project_session_file()` 的区别：
+- `find_project_session_file()`：返回唯一 Path 或 None（已做完整路由判断）
+- `list_session_candidates()`：返回所有活跃候选列表（不做路由判断，供上层做 liveness probe）
+
+**`TerminalBackend.list_panes()`**：
+
+```python
+class TerminalBackend(ABC):
+    @abstractmethod
+    def list_panes(self) -> list[dict]:
+        """
+        返回所有 pane 的信息列表。
+        每个 dict 至少包含：
+        - pane_id: str
+        - title: str（用于 marker 匹配）
+        """
+```
+
+各 backend 实现：
+- **WeztermBackend**：调用 `wezterm cli list --format json`（已有私有 `_list_panes()`，改为 public）
+- **TmuxBackend**：调用 `tmux list-panes -a -F '#{pane_id}\t#{pane_title}'`
+- **Iterm2Backend**：调用 osascript 获取 pane 列表
+
+上层阶段 2 的 liveness probe 伪代码：
+
+```python
+def _resolve_ambiguity(candidates: list[Path], backend: TerminalBackend) -> Optional[Path]:
+    """阶段 2：pane liveness probe，从多个候选中选出唯一存活的。"""
+    panes = backend.list_panes()
+    alive_pane_ids = {str(p["pane_id"]) for p in panes}
+    alive_titles = {p.get("title", "") for p in panes}
+
+    surviving = []
+    for candidate in candidates:
+        data = json.loads(candidate.read_text())
+        pane_id = data.get("pane_id", "")
+        marker = data.get("pane_title_marker", "")
+        if pane_id in alive_pane_ids or any(marker in t for t in alive_titles):
+            surviving.append(candidate)
+
+    if len(surviving) == 1:
+        return surviving[0]
+    elif len(surviving) == 0:
+        raise AmbiguityError("All candidates stale (no alive panes)")
+    else:
+        raise AmbiguityError(f"Multiple alive candidates: {[p.name for p in surviving]}")
+```
 
 ---
 
@@ -132,12 +197,10 @@ def find_project_session_file(
 
 ### Request dataclass 增加 ccb_session_id
 
-三个协议文件各自加字段：
+**CaskdRequest**（Codex，完整路由支持）：
 
 ```python
-# lib/ccb_protocol.py - CaskdRequest
-# lib/gaskd_protocol.py - GaskdRequest
-# lib/oaskd_protocol.py - OaskdRequest
+# lib/ccb_protocol.py
 @dataclass(frozen=True)
 class CaskdRequest:
     client_id: str
@@ -146,24 +209,42 @@ class CaskdRequest:
     quiet: bool
     message: str
     ccb_session_id: str | None = None    # 新增
-    caller_pane_id: str | None = None
+    caller_pane_id: str | None = None    # 已有
+    output_path: str | None = None
+```
+
+**GaskdRequest / OaskdRequest**（Gemini/OpenCode，仅加 session_id 路由）：
+
+```python
+# lib/gaskd_protocol.py - GaskdRequest
+# lib/oaskd_protocol.py - OaskdRequest
+@dataclass(frozen=True)
+class GaskdRequest:
+    client_id: str
+    work_dir: str
+    timeout_s: float
+    quiet: bool
+    message: str
+    ccb_session_id: str | None = None    # 新增（仅此一个字段）
+    # 注意：不新增 caller_pane_id，Gemini/OpenCode 不支持 pane fallback
     output_path: str | None = None
 ```
 
 ### 客户端 payload 增加 ccb_session_id
 
 ```python
-# lib/askd_client.py - try_daemon_request()
+# lib/askd_client.py - try_daemon_request(spec, work_dir, message, ...)
+# 按 provider 读取对应的 legacy env（见第 1 节 provider-specific alias 表）
 ccb_session_id = (
     os.environ.get("CCB_SESSION_ID") or
-    os.environ.get("CODEX_SESSION_ID") or
+    os.environ.get(spec.legacy_session_env) or  # CODEX/GEMINI/OPENCODE_SESSION_ID
     ""
 ).strip() or None
 
 payload = {
     ...
     "ccb_session_id": ccb_session_id,
-    "caller_pane_id": caller_pane_id,
+    "caller_pane_id": caller_pane_id,  # 仅 Codex 使用，Gemini/OpenCode 忽略
     ...
 }
 ```
@@ -317,6 +398,7 @@ Claude 子进程继承这些环境变量。Claude 内部通过 Bash tool 调用 
 | `lib/providers.py` | `ProviderClientSpec` 新增 `legacy_session_env` 字段 |
 | `ccb` | 注入 `CCB_SESSION_ID` env，`pane_title_marker` 唯一化（使用完整 session_id），`cmd_kill` 同步路由 + `clear_provider_registry_fields()` / 条件 `remove_registry()` |
 | `lib/session_utils.py` | `find_project_session_file` 的匹配和 fallback 语义改造（签名已有 `session_id` 参数，无需新增），新增 `list_session_candidates()` 供上层阶段 2 使用，保留父目录查找语义 |
+| `lib/terminal.py` | `TerminalBackend` 基类新增 `list_panes()` 抽象方法，`WeztermBackend._list_panes()` 改为 public，`TmuxBackend` / `Iterm2Backend` 新增 `list_panes()` 实现 |
 | `lib/caskd_session.py` | `compute_session_key` 优先 `ccb_session_id`，加 `ccb_session_id` property，`load_project_session` 加 `ccb_session_id` 参数 |
 | `lib/gaskd_session.py` | 同上 |
 | `lib/oaskd_session.py` | 同上 |
