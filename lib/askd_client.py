@@ -33,11 +33,35 @@ def state_file_from_env(env_name: str) -> Optional[Path]:
         return None
 
 
+def _read_ccb_session_id(spec: ProviderClientSpec) -> Optional[str]:
+    """Read CCB session ID with priority: CCB_SESSION_ID > legacy alias"""
+    ccb_id = os.environ.get("CCB_SESSION_ID", "").strip()
+    if ccb_id:
+        return ccb_id
+
+    # Fall back to provider-specific legacy env
+    legacy_env = spec.legacy_session_env
+    legacy_id = os.environ.get(legacy_env, "").strip()
+    return legacy_id if legacy_id else None
+
+
 def try_daemon_request(spec: ProviderClientSpec, work_dir: Path, message: str, timeout: float, quiet: bool, state_file: Optional[Path] = None) -> Optional[Tuple[str, int]]:
     if not env_bool(spec.enabled_env, True):
         return None
 
-    if not find_project_session_file(work_dir, spec.session_filename):
+    caller_pane_id = (
+        (os.environ.get("WEZTERM_PANE") or "").strip()
+        or (os.environ.get("TMUX_PANE") or "").strip()
+        or None
+    )
+    ccb_session_id = _read_ccb_session_id(spec)
+
+    if not find_project_session_file(
+        work_dir,
+        spec.session_filename,
+        caller_pane_id=caller_pane_id,
+        session_id=ccb_session_id,
+    ):
         return None
 
     from importlib import import_module
@@ -55,11 +79,6 @@ def try_daemon_request(spec: ProviderClientSpec, work_dir: Path, message: str, t
         return None
 
     try:
-        caller_pane_id = (
-            (os.environ.get("WEZTERM_PANE") or "").strip()
-            or (os.environ.get("TMUX_PANE") or "").strip()
-            or None
-        )
         payload = {
             "type": f"{spec.protocol_prefix}.request",
             "v": 1,
@@ -70,6 +89,7 @@ def try_daemon_request(spec: ProviderClientSpec, work_dir: Path, message: str, t
             "quiet": bool(quiet),
             "message": message,
             "caller_pane_id": caller_pane_id,
+            "ccb_session_id": ccb_session_id,
         }
         connect_timeout = min(1.0, max(0.1, float(timeout)))
         with socket.create_connection((host, port), timeout=connect_timeout) as sock:
@@ -103,7 +123,18 @@ def maybe_start_daemon(spec: ProviderClientSpec, work_dir: Path) -> bool:
         return False
     if not autostart_enabled(spec.autostart_env_primary, spec.autostart_env_legacy, True):
         return False
-    if not find_project_session_file(work_dir, spec.session_filename):
+    ccb_session_id = _read_ccb_session_id(spec)
+    caller_pane_id = (
+        (os.environ.get("WEZTERM_PANE") or "").strip()
+        or (os.environ.get("TMUX_PANE") or "").strip()
+        or None
+    )
+    if not find_project_session_file(
+        work_dir,
+        spec.session_filename,
+        caller_pane_id=caller_pane_id,
+        session_id=ccb_session_id,
+    ):
         return False
 
     candidates: list[str] = []
