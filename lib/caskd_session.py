@@ -245,16 +245,20 @@ def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None) -
 
 
 def compute_session_key(session: CodexProjectSession) -> str:
-    # Use a stable per-pane key for serialization.
-    # codex_session_id can change when the user runs `codex resume` inside the same pane; using it as a key
-    # can accidentally create a second worker and cause concurrent injection to the same pane.
-    marker = session.pane_title_marker
-    if marker:
-        return f"codex_marker:{marker}"
+    """Compute unique worker key for session.
+
+    Priority: ccb_session_id > pane_id > marker > file
+    """
+    ccb_sid = session.ccb_session_id
+    if ccb_sid:
+        return f"ccb:{ccb_sid}"
+
     pane = session.pane_id
     if pane:
         return f"codex_pane:{pane}"
-    sid = session.codex_session_id
-    if sid:
-        return f"codex:{sid}"
+
+    marker = session.pane_title_marker
+    if marker:
+        return f"codex_marker:{marker}"
+
     return f"codex_file:{session.session_file}"

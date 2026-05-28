@@ -1,5 +1,5 @@
 from pathlib import Path
-from caskd_session import CodexProjectSession
+from caskd_session import CodexProjectSession, compute_session_key
 
 
 def test_codex_project_session_has_ccb_session_id_property(tmp_path):
@@ -24,3 +24,23 @@ def test_codex_project_session_ccb_session_id_priority(tmp_path):
     data2 = {"session_id": "old-format"}
     session2 = CodexProjectSession(session_file=session_file, data=data2)
     assert session2.ccb_session_id == "old-format"
+
+
+def test_compute_session_key_prioritizes_ccb_session_id(tmp_path):
+    session_file = tmp_path / ".codex-session"
+    session_file.write_text("{}", encoding="utf-8")
+
+    data = {"session_id": "ai-1716890000-12345", "pane_id": "%42", "pane_title_marker": "CCB-Codex"}
+    session = CodexProjectSession(session_file=session_file, data=data)
+    key = compute_session_key(session)
+    assert key == "ccb:ai-1716890000-12345"
+
+
+def test_compute_session_key_falls_back_to_pane_id(tmp_path):
+    session_file = tmp_path / ".codex-session"
+    session_file.write_text("{}", encoding="utf-8")
+
+    data = {"pane_id": "%42", "pane_title_marker": "CCB-Codex"}
+    session = CodexProjectSession(session_file=session_file, data=data)
+    key = compute_session_key(session)
+    assert key == "codex_pane:%42"
