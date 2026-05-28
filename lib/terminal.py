@@ -621,7 +621,7 @@ class WeztermBackend(TerminalBackend):
 
         self._send_enter(pane_id)
 
-    def _list_panes(self) -> list[dict]:
+    def list_panes(self) -> list[dict]:
         try:
             result = _run(
                 [*self._cli_base_args(), "list", "--format", "json"],
@@ -649,11 +649,11 @@ class WeztermBackend(TerminalBackend):
         return None
 
     def find_pane_by_title_marker(self, marker: str) -> Optional[str]:
-        panes = self._list_panes()
+        panes = self.list_panes()
         return self._pane_id_by_title_marker(panes, marker)
 
     def is_alive(self, pane_id: str) -> bool:
-        panes = self._list_panes()
+        panes = self.list_panes()
         if not panes:
             return False
         if any(str(p.get("pane_id")) == str(pane_id) for p in panes):
