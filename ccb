@@ -29,7 +29,7 @@ from terminal import TmuxBackend, WeztermBackend, Iterm2Backend, detect_terminal
 from compat import setup_windows_encoding
 from ccb_config import get_backend_env
 from session_utils import safe_write_session, check_session_writable, allocate_session_file, find_project_session_file
-from pane_registry import upsert_registry, remove_registry
+from pane_registry import upsert_registry, remove_registry, clear_provider_registry_fields, load_registry_by_session_id
 from i18n import t
 
 setup_windows_encoding()
@@ -1659,10 +1659,18 @@ def cmd_kill(args):
     if not providers:
         return 2
 
+    # Read CCB_SESSION_ID for precise matching
+    ccb_session_id = os.environ.get("CCB_SESSION_ID", "").strip()
     caller_pane_id = (os.environ.get("WEZTERM_PANE") or os.environ.get("TMUX_PANE") or "").strip() or None
 
     for provider in providers:
-        session_file = find_project_session_file(Path.cwd(), f".{provider}-session", caller_pane_id=caller_pane_id)
+        # Find session file with precise matching
+        session_file = find_project_session_file(
+            Path.cwd(),
+            f".{provider}-session",
+            caller_pane_id=caller_pane_id,
+            session_id=ccb_session_id or None,
+        )
         if not session_file or not session_file.exists():
             print(f"⚠️ {provider}: Session file not found")
             continue
@@ -1671,6 +1679,7 @@ def cmd_kill(args):
             data = json.loads(session_file.read_text(encoding="utf-8-sig"))
             terminal = data.get("terminal", "tmux")
             pane_id = data.get("pane_id") if terminal in ("wezterm", "iterm2") else (data.get("pane_id") or data.get("tmux_session") or "")
+            session_id = data.get("session_id")
 
             if terminal == "wezterm" and pane_id:
                 backend = WeztermBackend()
@@ -1693,6 +1702,20 @@ def cmd_kill(args):
             data["active"] = False
             data["ended_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             safe_write_session(session_file, json.dumps(data, ensure_ascii=False, indent=2))
+
+            # Clear provider-specific registry fields (NOT entire registry)
+            if session_id:
+                clear_provider_registry_fields(session_id, provider)
+
+                # Check if all providers are inactive, then remove entire registry
+                registry_data = load_registry_by_session_id(session_id)
+                if registry_data:
+                    has_provider_fields = any(
+                        k.startswith("codex_") or k.startswith("gemini_") or k.startswith("opencode_")
+                        for k in registry_data.keys()
+                    )
+                    if not has_provider_fields:
+                        remove_registry(session_id)
 
             print(f"✅ {provider.capitalize()} terminated")
         except Exception as e:
