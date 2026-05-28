@@ -213,6 +213,10 @@ class TerminalBackend(ABC):
     def activate(self, pane_id: str) -> None: ...
     @abstractmethod
     def create_pane(self, cmd: str, cwd: str, direction: str = "right", percent: int = 50, parent_pane: Optional[str] = None) -> str: ...
+    @abstractmethod
+    def list_panes(self) -> list[dict]:
+        """Return all pane info. Each dict has at least pane_id and title."""
+        ...
 
 
 class TmuxBackend(TerminalBackend):
