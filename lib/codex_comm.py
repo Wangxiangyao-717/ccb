@@ -676,11 +676,18 @@ class CodexCommunicator:
         return find_project_session_file(
             Path.cwd(),
             ".codex-session",
-            session_id=os.environ.get("CODEX_SESSION_ID"),
+            session_id=(
+                os.environ.get("CCB_SESSION_ID") or
+                os.environ.get("CODEX_SESSION_ID") or
+                ""
+            ).strip() or None,
         )
 
     def _load_session_info(self):
-        if "CODEX_SESSION_ID" in os.environ:
+        _ccb_sid = (os.environ.get("CCB_SESSION_ID") or "").strip()
+        _codex_sid = (os.environ.get("CODEX_SESSION_ID") or "").strip()
+        _effective_sid = _ccb_sid or _codex_sid
+        if _effective_sid:
             terminal = os.environ.get("CODEX_TERMINAL", "tmux")
             # Get pane_id based on terminal type
             if terminal == "wezterm":
@@ -688,7 +695,7 @@ class CodexCommunicator:
             else:
                 pane_id = ""
             result = {
-                "session_id": os.environ["CODEX_SESSION_ID"],
+                "session_id": _effective_sid,
                 "runtime_dir": os.environ["CODEX_RUNTIME_DIR"],
                 "input_fifo": os.environ["CODEX_INPUT_FIFO"],
                 "output_fifo": os.environ.get("CODEX_OUTPUT_FIFO", ""),
@@ -708,7 +715,7 @@ class CodexCommunicator:
                         result["_session_file"] = str(session_file)
                 except Exception:
                     pass
-            registry = load_registry_by_session_id(os.environ["CODEX_SESSION_ID"])
+            registry = load_registry_by_session_id(_effective_sid)
             if isinstance(registry, dict):
                 reg_log = registry.get("codex_session_path")
                 reg_id = registry.get("codex_session_id")
