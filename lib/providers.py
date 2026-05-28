@@ -23,6 +23,7 @@ class ProviderClientSpec:
     session_filename: str
     daemon_bin_name: str
     daemon_module: str
+    legacy_session_env: str
 
 
 CASKD_SPEC = ProviderDaemonSpec(
@@ -64,6 +65,7 @@ CASK_CLIENT_SPEC = ProviderClientSpec(
     session_filename=".codex-session",
     daemon_bin_name="caskd",
     daemon_module="caskd_daemon",
+    legacy_session_env="CODEX_SESSION_ID",
 )
 
 
@@ -76,6 +78,7 @@ GASK_CLIENT_SPEC = ProviderClientSpec(
     session_filename=".gemini-session",
     daemon_bin_name="gaskd",
     daemon_module="gaskd_daemon",
+    legacy_session_env="GEMINI_SESSION_ID",
 )
 
 
@@ -88,4 +91,5 @@ OASK_CLIENT_SPEC = ProviderClientSpec(
     session_filename=".opencode-session",
     daemon_bin_name="oaskd",
     daemon_module="oaskd_daemon",
+    legacy_session_env="OPENCODE_SESSION_ID",
 )

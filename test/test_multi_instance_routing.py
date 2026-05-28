@@ -48,3 +48,12 @@ def test_oaskd_request_accepts_ccb_session_id():
     )
     assert req.ccb_session_id == "ai-123"
     assert not hasattr(req, 'caller_pane_id')
+
+
+from providers import CASK_CLIENT_SPEC, GASK_CLIENT_SPEC, OASK_CLIENT_SPEC
+
+
+def test_provider_client_spec_has_legacy_session_env():
+    assert CASK_CLIENT_SPEC.legacy_session_env == "CODEX_SESSION_ID"
+    assert GASK_CLIENT_SPEC.legacy_session_env == "GEMINI_SESSION_ID"
+    assert OASK_CLIENT_SPEC.legacy_session_env == "OPENCODE_SESSION_ID"
