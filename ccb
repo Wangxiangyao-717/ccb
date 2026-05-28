@@ -1440,6 +1440,8 @@ class AILauncher:
         print(f"🚀 {t('starting_claude')}")
 
         env = os.environ.copy()
+        # Set CCB_SESSION_ID for multi-instance routing
+        env["CCB_SESSION_ID"] = self.session_id
         if "codex" in self.providers:
             runtime = self.runtime_dir / "codex"
             env["CODEX_SESSION_ID"] = self.session_id
