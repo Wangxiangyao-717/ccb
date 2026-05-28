@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from session_utils import find_project_session_file, safe_write_session
+from session_utils import find_project_session_file, list_session_candidates, safe_write_session
 
 
 def test_find_project_session_file_walks_upwards(tmp_path: Path) -> None:
@@ -103,4 +103,54 @@ def test_safe_write_session_atomic_write(tmp_path: Path) -> None:
     assert err2 is None
     assert target.read_text(encoding="utf-8") == '{"hello":"again"}\n'
     assert not target.with_suffix(".tmp").exists()
+
+
+def test_list_session_candidates_returns_active_only(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    (root / ".codex-session").write_text(
+        json.dumps({"session_id": "s1", "active": True}), encoding="utf-8"
+    )
+    (root / ".codex-session-1").write_text(
+        json.dumps({"session_id": "s2", "active": False}), encoding="utf-8"
+    )
+    (root / ".codex-session-2").write_text(
+        json.dumps({"session_id": "s3", "active": True, "ended_at": "2026-05-28"}),
+        encoding="utf-8",
+    )
+
+    candidates = list_session_candidates(root, ".codex-session")
+    assert len(candidates) == 1
+
+
+def test_list_session_candidates_walks_upwards(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    leaf = root / "a" / "b"
+    leaf.mkdir(parents=True)
+
+    (root / ".codex-session").write_text(
+        json.dumps({"session_id": "s1", "active": True}), encoding="utf-8"
+    )
+
+    candidates = list_session_candidates(leaf, ".codex-session")
+    assert len(candidates) == 1
+
+
+def test_list_session_candidates_sorted_by_proximity(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    sub = root / "sub"
+    sub.mkdir()
+
+    (root / ".codex-session").write_text(
+        json.dumps({"session_id": "s1", "active": True}), encoding="utf-8"
+    )
+    (sub / ".codex-session-1").write_text(
+        json.dumps({"session_id": "s2", "active": True}), encoding="utf-8"
+    )
+
+    candidates = list_session_candidates(sub, ".codex-session")
+    assert len(candidates) == 2
+    assert candidates[0].parent == sub  # nearest first
 

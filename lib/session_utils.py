@@ -266,3 +266,33 @@ def find_project_session_file(work_dir: Path, session_filename: str, *, caller_p
             return active_candidates[0][0]
         else:
             return None  # Ambiguity - upper layer does phase 2
+
+
+def list_session_candidates(work_dir: Path, session_filename: str) -> list[Path]:
+    """Return all active candidate session files from cwd up to parent directories.
+
+    Lightweight filter: ``active != False`` and no ``ended_at``.
+    Sorted by proximity (nearest first), then by number within same directory.
+    """
+    all_candidates: list[tuple[int, Path]] = []
+    current = Path(work_dir).resolve()
+    distance = 0
+
+    while True:
+        candidates = list(_iter_session_file_candidates(current, session_filename))
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+                if data.get("active") is False or data.get("ended_at"):
+                    continue
+                all_candidates.append((distance, candidate))
+            except Exception:
+                continue
+
+        if current == current.parent:
+            break
+        current = current.parent
+        distance += 1
+
+    all_candidates.sort(key=lambda x: x[0])
+    return [path for _, path in all_candidates]
