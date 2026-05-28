@@ -15,8 +15,8 @@ from terminal import get_backend_for_session
 apply_backend_env()
 
 
-def find_project_session_file(work_dir: Path, caller_pane_id: Optional[str] = None) -> Optional[Path]:
-    return _find_project_session_file(work_dir, ".codex-session", caller_pane_id=caller_pane_id)
+def find_project_session_file(work_dir: Path, caller_pane_id: Optional[str] = None, session_id: Optional[str] = None) -> Optional[Path]:
+    return _find_project_session_file(work_dir, ".codex-session", caller_pane_id=caller_pane_id, session_id=session_id)
 
 
 def _read_json(path: Path) -> dict:
@@ -42,7 +42,7 @@ def _normalize_work_dir(value: str | Path) -> str:
         return raw.replace("\\", "/").lower()
 
 
-def _load_registry_backed_session(work_dir: Path, caller_pane_id: Optional[str]) -> Optional["CodexProjectSession"]:
+def _load_registry_backed_session(work_dir: Path, caller_pane_id: Optional[str], expected_ccb_session_id: Optional[str] = None) -> Optional["CodexProjectSession"]:
     pane_id = str(caller_pane_id or "").strip()
     if not pane_id:
         return None
@@ -50,6 +50,12 @@ def _load_registry_backed_session(work_dir: Path, caller_pane_id: Optional[str])
     record = load_registry_by_claude_pane(pane_id)
     if not isinstance(record, dict):
         return None
+
+    # Validate ccb_session_id if provided
+    if expected_ccb_session_id:
+        registry_ccb_session_id = str(record.get("ccb_session_id") or "").strip()
+        if registry_ccb_session_id != expected_ccb_session_id:
+            return None
 
     expected_work_dir = _normalize_work_dir(work_dir)
     record_work_dir = _normalize_work_dir(record.get("work_dir_norm") or record.get("work_dir") or "")
@@ -225,17 +231,17 @@ class CodexProjectSession:
             _ = err
 
 
-def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None) -> Optional[CodexProjectSession]:
+def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None, ccb_session_id: Optional[str] = None) -> Optional[CodexProjectSession]:
     caller_pane_id = (
         str(caller_pane_id or "").strip()
         or (os.environ.get("WEZTERM_PANE") or "").strip()
         or (os.environ.get("TMUX_PANE") or "").strip()
     )
-    session = _load_registry_backed_session(work_dir, caller_pane_id)
+    session = _load_registry_backed_session(work_dir, caller_pane_id, ccb_session_id)
     if session is not None:
         return session
 
-    session_file = find_project_session_file(work_dir, caller_pane_id=caller_pane_id)
+    session_file = find_project_session_file(work_dir, caller_pane_id=caller_pane_id, session_id=ccb_session_id)
     if not session_file:
         return None
     data = _read_json(session_file)
