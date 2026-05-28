@@ -80,7 +80,7 @@ class _SessionWorker(BaseSessionWorker[_QueuedTask, OaskdResult]):
             )
 
         try:
-            session = load_project_session(work_dir)
+            session = load_project_session(work_dir, ccb_session_id=req.ccb_session_id)
             if not session:
                 return OaskdResult(
                     exit_code=1,
@@ -243,7 +243,7 @@ class _WorkerPool:
         req_id = make_req_id()
         task = _QueuedTask(request=request, created_ms=_now_ms(), req_id=req_id, done_event=threading.Event())
 
-        session = load_project_session(Path(request.work_dir))
+        session = load_project_session(Path(request.work_dir), ccb_session_id=request.ccb_session_id)
         session_key = compute_session_key(session) if session else "opencode:unknown"
 
         worker = self._pool.get_or_create(session_key, _SessionWorker)
@@ -273,6 +273,7 @@ class OaskdServer:
                     timeout_s=float(msg.get("timeout_s") or 300.0),
                     quiet=bool(msg.get("quiet") or False),
                     message=str(msg.get("message") or ""),
+                    ccb_session_id=str(msg.get("ccb_session_id") or "") or None,
                     output_path=str(msg.get("output_path")) if msg.get("output_path") else None,
                 )
             except Exception as exc:
