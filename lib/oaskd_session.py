@@ -13,8 +13,8 @@ from terminal import get_backend_for_session
 apply_backend_env()
 
 
-def find_project_session_file(work_dir: Path) -> Optional[Path]:
-    return _find_project_session_file(work_dir, ".opencode-session")
+def find_project_session_file(work_dir: Path, caller_pane_id: Optional[str] = None, session_id: Optional[str] = None) -> Optional[Path]:
+    return _find_project_session_file(work_dir, ".opencode-session", caller_pane_id=caller_pane_id, session_id=session_id)
 
 
 def _read_json(path: Path) -> dict:
@@ -44,7 +44,12 @@ class OpenCodeProjectSession:
 
     @property
     def ccb_session_id(self) -> str:
-        return self.session_id
+        """CCB launcher session ID. Prefers ccb_session_id field, falls back to session_id for backward compat."""
+        value = self.data.get("ccb_session_id")
+        if value:
+            return str(value).strip()
+        value = self.data.get("session_id")
+        return str(value or "").strip()
 
     @property
     def terminal(self) -> str:
@@ -176,8 +181,8 @@ class OpenCodeProjectSession:
             return
 
 
-def load_project_session(work_dir: Path) -> Optional[OpenCodeProjectSession]:
-    session_file = find_project_session_file(work_dir)
+def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None, ccb_session_id: Optional[str] = None) -> Optional[OpenCodeProjectSession]:
+    session_file = find_project_session_file(work_dir, caller_pane_id=caller_pane_id, session_id=ccb_session_id)
     if not session_file:
         return None
     data = _read_json(session_file)
@@ -187,13 +192,20 @@ def load_project_session(work_dir: Path) -> Optional[OpenCodeProjectSession]:
 
 
 def compute_session_key(session: OpenCodeProjectSession) -> str:
-    marker = session.pane_title_marker
-    if marker:
-        return f"opencode_marker:{marker}"
+    """Compute unique worker key for session.
+
+    Priority: ccb_session_id > pane_id > marker > file
+    """
+    ccb_sid = session.ccb_session_id
+    if ccb_sid:
+        return f"ccb:{ccb_sid}"
+
     pane = session.pane_id
     if pane:
         return f"opencode_pane:{pane}"
-    sid = session.session_id
-    if sid:
-        return f"opencode:{sid}"
+
+    marker = session.pane_title_marker
+    if marker:
+        return f"opencode_marker:{marker}"
+
     return f"opencode_file:{session.session_file}"
