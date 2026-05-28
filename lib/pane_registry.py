@@ -152,3 +152,44 @@ def remove_registry(session_id: str) -> bool:
     except Exception as exc:
         _debug(f"Failed to remove registry {path}: {exc}")
         return False
+
+
+def clear_provider_registry_fields(session_id: str, provider: str) -> bool:
+    """
+    Clear provider-specific fields from registry, keeping other providers and claude_pane_id.
+
+    Args:
+        session_id: CCB session ID
+        provider: provider name ("codex", "gemini", "opencode")
+
+    Returns:
+        True if fields were cleared, False if session not found or error
+    """
+    if not session_id or not provider:
+        return False
+
+    path = registry_path_for_session(str(session_id))
+    if not path.exists():
+        return False
+
+    data = _load_registry_file(path)
+    if not data:
+        return False
+
+    prefix = f"{provider}_"
+    keys_to_remove = [k for k in data.keys() if k.startswith(prefix)]
+
+    if not keys_to_remove:
+        return True
+
+    for key in keys_to_remove:
+        del data[key]
+
+    data["updated_at"] = int(time.time())
+
+    try:
+        atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+        return True
+    except Exception as exc:
+        _debug(f"Failed to clear provider fields {path}: {exc}")
+        return False
