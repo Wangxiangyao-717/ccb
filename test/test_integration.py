@@ -194,6 +194,7 @@ def test_client_try_daemon_request(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         session_filename=".itest-session",
         daemon_bin_name="itestd",
         daemon_module=module_name,
+        legacy_session_env="ITEST_SESSION_ID",
     )
 
     monkeypatch.setenv(client_spec.enabled_env, "1")
