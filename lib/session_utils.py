@@ -183,7 +183,23 @@ def allocate_session_file(work_dir: Path, session_filename: str, *, session_id: 
 
 
 def find_project_session_file(work_dir: Path, session_filename: str, *, caller_pane_id: str | None = None, session_id: str | None = None) -> Optional[Path]:
+    """Locate the session file that belongs to the current caller.
+
+    Routing rules (in priority order):
+    1. If *session_id* is provided: precise match only, return None if no match.
+    2. If *caller_pane_id* is provided: look up the registry to obtain the
+       expected session_id, then do a precise match.  A work_dir consistency
+       check prevents cross-project misrouting.
+    3. If no identity can be determined: return the single active candidate
+       when unambiguous, otherwise return None so the upper layer can run
+       its phase-2 liveness probe.
+
+    Active candidates are filtered by ``active != False`` and ``ended_at``
+    being absent.  The parent-directory walk is preserved from the original
+    implementation.
+    """
     expected_session_id = str(session_id or "").strip()
+
     if not expected_session_id:
         pane_id = str(caller_pane_id or "").strip()
         if pane_id:
@@ -192,17 +208,61 @@ def find_project_session_file(work_dir: Path, session_filename: str, *, caller_p
             except Exception:
                 record = None
             if isinstance(record, dict):
-                expected_session_id = str(record.get("ccb_session_id") or "").strip()
+                # Validate work_dir consistency (prevent cross-project misrouting)
+                registry_work_dir = str(
+                    record.get("work_dir_norm") or record.get("work_dir") or ""
+                )
+                if registry_work_dir:
+                    try:
+                        resolved_work_dir = str(Path(work_dir).resolve())
+                        # Simple normalized comparison: resolve both paths and
+                        # compare case-insensitively on Windows.
+                        norm_registry = registry_work_dir.replace("\\", "/").rstrip("/")
+                        norm_request = resolved_work_dir.replace("\\", "/").rstrip("/")
+                        if os.name == "nt":
+                            norm_registry = norm_registry.casefold()
+                            norm_request = norm_request.casefold()
+                        if norm_registry != norm_request:
+                            record = None
+                    except Exception:
+                        pass
+                if record:
+                    expected_session_id = str(
+                        record.get("ccb_session_id") or ""
+                    ).strip()
 
     current = Path(work_dir).resolve()
     while True:
         candidates = list(_iter_session_file_candidates(current, session_filename))
+
+        # Filter active candidates (active != False && no ended_at)
+        active_candidates: list[tuple[Path, dict]] = []
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+                if data.get("active") is False or data.get("ended_at"):
+                    continue
+                active_candidates.append((candidate, data))
+            except Exception:
+                continue
+
         if expected_session_id:
-            for candidate in candidates:
-                if expected_session_id in _read_session_identity(candidate):
+            for candidate, data in active_candidates:
+                file_session_id = str(data.get("session_id") or "").strip()
+                if file_session_id == expected_session_id:
                     return candidate
-        if candidates:
-            return candidates[0]
-        if current == current.parent:
-            return None
-        current = current.parent
+            # No match at this level - continue parent walk if possible
+            if current == current.parent:
+                return None  # Exhausted all levels, precise match failed
+            current = current.parent
+            continue
+
+        if len(active_candidates) == 0:
+            if current == current.parent:
+                return None
+            current = current.parent
+            continue
+        elif len(active_candidates) == 1:
+            return active_candidates[0][0]
+        else:
+            return None  # Ambiguity - upper layer does phase 2
