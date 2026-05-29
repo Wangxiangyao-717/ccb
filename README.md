@@ -51,6 +51,8 @@ ccb up -C glm codex       # glm 模型 + Codex
 ccb up codex              # 默认 claude + Codex
 ```
 
+> **⚠️ 同目录多实例限制：** 同一个项目目录下可以启动多个 CCB 实例（例如在 WezTerm 的不同 tab 中），但**所有实例必须使用相同的终端后端**（全部 WezTerm 或全部 tmux）。**禁止在同一目录混用 tmux 和 WezTerm**，否则会导致路由歧义。
+
 ## ⚡ 核心优势
 
 | 特性 | 价值 |
