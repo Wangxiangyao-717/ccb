@@ -111,6 +111,29 @@ def _load_registry_backed_session(work_dir: Path, caller_pane_id: Optional[str],
     codex_session_id = str(record.get("codex_session_id") or "").strip()
     if codex_session_id:
         data["codex_session_id"] = codex_session_id
+
+    # Liveness check: verify the pane is actually alive before returning
+    backend = get_backend_for_session(data)
+    if backend and hasattr(backend, 'list_panes'):
+        try:
+            panes = backend.list_panes()
+            alive_pane_ids = {str(p.get("pane_id")) for p in panes}
+            alive_titles = {p.get("title", "") for p in panes}
+            pane_id = str(data.get("pane_id") or "")
+            marker = str(data.get("pane_title_marker") or "")
+            pane_alive = (
+                (pane_id and pane_id in alive_pane_ids) or
+                (marker and marker in alive_titles)
+            )
+            if not pane_alive:
+                # Pane is dead, clean codex fields from registry
+                if ccb_session_id:
+                    clear_provider_registry_fields(ccb_session_id, "codex")
+                return None
+        except Exception:
+            # Probe failed, fail-closed: don't return potentially stale session
+            return None
+
     return CodexProjectSession(session_file=session_file, data=data)
 
 
@@ -259,12 +282,14 @@ def _resolve_ambiguity(candidates: list[Path]) -> Optional[Path]:
 
     backend = get_backend_for_session(first_data)
     if not backend or not hasattr(backend, 'list_panes'):
-        return candidates[0]
+        # Fail-closed: cannot probe, cannot determine which is alive
+        raise AmbiguityError(f"Cannot probe panes (backend unavailable), {len(candidates)} active candidates exist")
 
     try:
         panes = backend.list_panes()
     except Exception:
-        return candidates[0]
+        # Fail-closed: probe failed, cannot determine which is alive
+        raise AmbiguityError(f"Pane liveness probe failed, {len(candidates)} active candidates exist")
 
     alive_pane_ids = {str(p.get("pane_id")) for p in panes}
     alive_titles = {p.get("title", "") for p in panes}
@@ -318,8 +343,8 @@ def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None, c
     if not ccb_session_id:
         candidates = list_session_candidates(work_dir, ".codex-session")
         if len(candidates) > 1:
-            # Multiple active candidates - Phase 1 result is unreliable.
-            # Use Phase 2 liveness probe to find the truly alive one.
+            # Multiple active candidates - use Phase 2 liveness probe to find the truly alive one.
+            # Let AmbiguityError propagate to caller (fail-closed: don't silently pick one)
             resolved = _resolve_ambiguity(candidates)
             if resolved:
                 data = _read_json(resolved)
@@ -328,6 +353,7 @@ def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None, c
             return None
 
     # Single candidate or precise match - use Phase 1 result
+    # (let ensure_pane() handle pane death via respawn)
     if session_file:
         data = _read_json(session_file)
         if data:

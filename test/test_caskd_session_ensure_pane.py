@@ -24,6 +24,14 @@ class FakeTmuxBackend:
                 return pane
         return None
 
+    def list_panes(self) -> list[dict]:
+        """Return list of alive panes with their IDs and titles."""
+        return [
+            {"pane_id": pane_id, "title": ""}
+            for pane_id, is_alive in self.alive.items()
+            if is_alive
+        ]
+
     def save_crash_log(self, pane_id: str, crash_log_path: str, *, lines: int = 1000) -> None:
         self.crash_logs.append((pane_id, crash_log_path))
 
@@ -159,6 +167,13 @@ def test_load_project_session_prefers_registry_for_caller_pane(tmp_path: Path, m
             "work_dir_norm": str(tmp_path).lower(),
         },
     )
+
+    # Mock backend to return pane "20" as alive (for liveness check)
+    class MockBackend:
+        def list_panes(self):
+            return [{"pane_id": "20", "title": "CCB-Codex"}]
+
+    monkeypatch.setattr(caskd_session, "get_backend_for_session", lambda data: MockBackend())
 
     sess = caskd_session.load_project_session(tmp_path, caller_pane_id="16")
 
