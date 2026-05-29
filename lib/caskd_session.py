@@ -117,22 +117,28 @@ def _load_registry_backed_session(work_dir: Path, caller_pane_id: Optional[str],
     if backend and hasattr(backend, 'list_panes'):
         try:
             panes = backend.list_panes()
-            alive_pane_ids = {str(p.get("pane_id")) for p in panes}
-            alive_titles = {p.get("title", "") for p in panes}
-            pane_id = str(data.get("pane_id") or "")
-            marker = str(data.get("pane_title_marker") or "")
-            pane_alive = (
-                (pane_id and pane_id in alive_pane_ids) or
-                (marker and marker in alive_titles)
-            )
-            if not pane_alive:
-                # Pane is dead, clean codex fields from registry
-                if ccb_session_id:
-                    clear_provider_registry_fields(ccb_session_id, "codex")
-                return None
+            # Only do liveness check if we got actual pane data.
+            # Empty list could mean probe failure (tmux/wezterm command failed)
+            # or unimplemented backend (iTerm2 returns [] always).
+            # In both cases, trust the registry rather than cleaning it.
+            if panes:
+                alive_pane_ids = {str(p.get("pane_id")) for p in panes}
+                alive_titles = {p.get("title", "") for p in panes}
+                pane_id = str(data.get("pane_id") or "")
+                marker = str(data.get("pane_title_marker") or "")
+                pane_alive = (
+                    (pane_id and pane_id in alive_pane_ids) or
+                    (marker and marker in alive_titles)
+                )
+                if not pane_alive:
+                    # Pane is dead and we have proof (non-empty pane list),
+                    # clean codex fields from registry
+                    if ccb_session_id:
+                        clear_provider_registry_fields(ccb_session_id, "codex")
+                    return None
         except Exception:
-            # Probe failed, fail-closed: don't return potentially stale session
-            return None
+            # Probe failed, trust registry and return session
+            pass
 
     return CodexProjectSession(session_file=session_file, data=data)
 
