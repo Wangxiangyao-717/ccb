@@ -168,3 +168,73 @@ def test_registry_fallback_validates_and_cleans_stale(tmp_path, monkeypatch):
     assert "codex_pane_id" not in registry
     assert "codex_runtime_dir" not in registry
     assert registry["claude_pane_id"] == "claude-pane-1"
+
+
+# --- Bug fix: stale sessions with dead panes + new alive session ---
+
+
+def test_load_project_session_skips_stale_sessions_finds_alive_one(tmp_path, monkeypatch):
+    """When old sessions have dead panes and a new session has an alive pane,
+    should find the alive one even without explicit ccb_session_id."""
+    monkeypatch.delenv("WEZTERM_PANE", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    # Old stale session: active=True but pane is dead
+    (root / ".codex-session").write_text(json.dumps({
+        "session_id": "old-session", "active": True,
+        "pane_id": "dead-pane-1", "pane_title_marker": "CCB-Codex",
+    }), encoding="utf-8")
+
+    # Another old stale session
+    (root / ".codex-session-1").write_text(json.dumps({
+        "session_id": "old-session-2", "active": True,
+        "pane_id": "dead-pane-2", "pane_title_marker": "CCB-Codex",
+    }), encoding="utf-8")
+
+    # New session with alive pane
+    (root / ".codex-session-2").write_text(json.dumps({
+        "session_id": "new-session", "active": True,
+        "pane_id": "alive-pane", "pane_title_marker": "CCB-Codex-new-id",
+    }), encoding="utf-8")
+
+    # Backend shows only the new pane is alive
+    class MockBackend:
+        def list_panes(self):
+            return [{"pane_id": "alive-pane", "title": "CCB-Codex-new-id"}]
+
+    monkeypatch.setattr("caskd_session.get_backend_for_session", lambda data: MockBackend())
+
+    session = load_project_session(root)
+    assert session is not None
+    assert session.ccb_session_id == "new-session"
+
+
+def test_load_project_session_with_caller_pane_still_triggers_phase2(tmp_path, monkeypatch):
+    """Phase 2 should trigger even when caller_pane_id exists but no ccb_session_id."""
+    # caller_pane_id is set but doesn't match any registry entry
+    monkeypatch.setenv("WEZTERM_PANE", "pane-999")
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setattr("caskd_session.load_registry_by_claude_pane", lambda pid: None)
+
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    (root / ".codex-session").write_text(json.dumps({
+        "session_id": "stale", "active": True, "pane_id": "dead",
+    }), encoding="utf-8")
+    (root / ".codex-session-1").write_text(json.dumps({
+        "session_id": "alive-session", "active": True, "pane_id": "alive",
+    }), encoding="utf-8")
+
+    class MockBackend:
+        def list_panes(self):
+            return [{"pane_id": "alive", "title": ""}]
+
+    monkeypatch.setattr("caskd_session.get_backend_for_session", lambda data: MockBackend())
+
+    session = load_project_session(root, caller_pane_id="pane-999")
+    assert session is not None
+    assert session.ccb_session_id == "alive-session"

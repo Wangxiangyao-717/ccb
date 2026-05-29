@@ -278,7 +278,9 @@ def _resolve_ambiguity(candidates: list[Path]) -> Optional[Path]:
         marker = str(data.get("pane_title_marker") or "")
         if pane_id and pane_id in alive_pane_ids:
             surviving.append(candidate)
-        elif marker and any(marker in t for t in alive_titles):
+        elif marker and marker in alive_titles:
+            # Use exact match for markers to avoid prefix collisions
+            # (e.g., "CCB-Codex" should not match "CCB-Codex-ai-123")
             surviving.append(candidate)
 
     if len(surviving) == 1:
@@ -301,23 +303,35 @@ def load_project_session(work_dir: Path, caller_pane_id: Optional[str] = None, c
         if session is not None:
             return session
 
-    # Phase 1: find_project_session_file
+    # Phase 1: find_project_session_file (file-level filtering only)
     session_file = find_project_session_file(work_dir, caller_pane_id=caller_pane_id, session_id=ccb_session_id)
-    if session_file:
+
+    # If we have an explicit session_id, trust Phase 1 (precise match)
+    if session_file and ccb_session_id:
         data = _read_json(session_file)
         if data:
             return CodexProjectSession(session_file=session_file, data=data)
         return None
 
-    # Phase 2: liveness probe (only when no explicit identity provided)
-    if not ccb_session_id and not caller_pane_id:
+    # Without explicit session_id, Phase 1 may return a stale session
+    # (active=True but pane dead). Check how many active candidates exist.
+    if not ccb_session_id:
         candidates = list_session_candidates(work_dir, ".codex-session")
         if len(candidates) > 1:
+            # Multiple active candidates - Phase 1 result is unreliable.
+            # Use Phase 2 liveness probe to find the truly alive one.
             resolved = _resolve_ambiguity(candidates)
             if resolved:
                 data = _read_json(resolved)
                 if data:
                     return CodexProjectSession(session_file=resolved, data=data)
+            return None
+
+    # Single candidate or precise match - use Phase 1 result
+    if session_file:
+        data = _read_json(session_file)
+        if data:
+            return CodexProjectSession(session_file=session_file, data=data)
 
     return None
 
