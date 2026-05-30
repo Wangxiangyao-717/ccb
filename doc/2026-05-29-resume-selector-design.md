@@ -225,44 +225,7 @@ The `claude_session_id` field in `.codex-session*` files directly contains the C
 
 For legacy session files (created before this feature was added), we fall back to mtime matching as a best-effort approach.
 
-```python
-def _get_jsonl_path(session_data: dict) -> Optional[Path]:
-    """Get Claude JSONL path from session data."""
-    claude_uuid = session_data.get("claude_session_id")
-    if not claude_uuid:
-        return None
-    
-    project_dir = _claude_project_dir(Path.cwd())
-    jsonl_file = project_dir / f"{claude_uuid}.jsonl"
-    
-    if jsonl_file.exists():
-        return jsonl_file
-    return None
-```
-
-For old session files without `claude_session_id`, fall back to mtime matching (best effort):
-
-```python
-def _find_jsonl_for_legacy_session(started_at: str) -> Optional[Path]:
-    """Fallback: find JSONL by mtime for old sessions without claude_session_id."""
-    project_dir = _claude_project_dir(Path.cwd())
-    if not project_dir.exists():
-        return None
-    
-    jsonl_files = list(project_dir.glob("*.jsonl"))
-    if not jsonl_files:
-        return None
-    
-    try:
-        target_time = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S").timestamp()
-    except:
-        return None
-    
-    closest = min(jsonl_files, key=lambda f: abs(f.stat().st_mtime - target_time))
-    if abs(closest.stat().st_mtime - target_time) < 3600:
-        return closest
-    return None
-```
+The complete implementation is in the `ResumeSelectorApp._get_jsonl_path()` method shown in the Implementation section below.
 
 ## Implementation
 
@@ -410,6 +373,7 @@ class ResumeSelectorApp(App):
         """
         from pathlib import Path
         import re
+        import os
         
         projects_root = Path.home() / ".claude" / "projects"
         
