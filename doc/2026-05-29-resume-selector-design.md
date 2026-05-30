@@ -153,12 +153,14 @@ def _start_claude(self) -> int:
 def _detect_new_claude_session(self) -> Optional[str]:
     """Find the newest JSONL file created during this CCB session.
     
-    Note: This is a best-effort detection using mtime. In concurrent scenarios
+    Warning: This is a best-effort detection using mtime. In concurrent scenarios
     (e.g., two CCB instances started at the same time in different tabs), this
-    may pick up the wrong JSONL file. This is acceptable because:
-    1. Concurrent CCB instances in the same directory are rare
-    2. The fallback is that claude_session_id remains None, and resume still
-       works via mtime matching in _get_latest_claude_session_id()
+    may pick up the wrong JSONL file and write an incorrect UUID into the session file.
+    
+    Mitigation:
+    - Concurrent CCB instances in the same directory are rare in practice
+    - Users can manually edit the session file if resume picks the wrong session
+    - Future improvement: Add a confirmation prompt when resuming to let users verify the selected session
     """
     project_dir = self._claude_project_dir(Path.cwd())
     if not project_dir.exists():
@@ -188,10 +190,9 @@ The `gemini_session_id` and `opencode_session_id` fields are not written at sess
 
 1. A freshly started session may not have these fields yet
 2. When resuming, if these fields are missing, we fall back to the existing "resume latest" logic
-3. This is acceptable because:
-   - Most sessions that have been used will have these fields populated
-   - The fallback is safe (resumes the latest session, which is usually correct)
-   - We can improve this in the future by writing provider session IDs at startup if needed
+3. **Risk**: In the context of the resume selector, "resume latest" means restoring a different session than what the user selected. This is not ideal but is better than failing entirely.
+4. **Mitigation**: Show a warning to users when falling back: "Provider X session ID not recorded, resuming latest session instead of selected session"
+5. Future improvement: Write provider session IDs at startup to eliminate this issue
 
 ### User Message Extraction
 
@@ -377,19 +378,72 @@ class ResumeSelectorApp(App):
         return sessions
     
     def _get_jsonl_path(self, session_data: dict) -> Optional[Path]:
-        """Get Claude JSONL path from session data using claude_session_id."""
+        """Get Claude JSONL path from session data.
+        
+        Priority:
+        1. Use claude_session_id if available (direct lookup)
+        2. Fall back to mtime matching for old session files
+        """
+        # Try direct lookup using claude_session_id
         claude_uuid = session_data.get("claude_session_id")
-        if not claude_uuid:
+        if claude_uuid:
+            project_dir = self._get_claude_project_dir()
+            jsonl_file = project_dir / f"{claude_uuid}.jsonl"
+            if jsonl_file.exists():
+                return jsonl_file
             return None
         
-        # Use existing CCB helper to get project directory
-        from ccb import _claude_project_dir
-        project_dir = _claude_project_dir(self.work_dir)
-        jsonl_file = project_dir / f"{claude_uuid}.jsonl"
+        # Fallback: mtime matching for legacy session files
+        started_at = session_data.get("started_at")
+        if started_at:
+            return self._find_jsonl_by_mtime(started_at)
         
-        if jsonl_file.exists():
-            return jsonl_file
         return None
+    
+    def _get_claude_project_dir(self) -> Path:
+        """Get Claude project directory for current working directory.
+        
+        This is a simplified version of AILauncher._claude_project_dir().
+        """
+        from pathlib import Path
+        work_dir = str(self.work_dir.resolve())
+        # Claude uses hash of project path
+        project_hash = hashlib.sha256(work_dir.encode()).hexdigest()[:16]
+        return Path.home() / ".claude" / "projects" / project_hash
+    
+    def _find_jsonl_by_mtime(self, started_at: str) -> Optional[Path]:
+        """Find JSONL file by matching started_at timestamp.
+        
+        This is a fallback for old session files that don't have claude_session_id.
+        """
+        from datetime import datetime
+        
+        project_dir = self._get_claude_project_dir()
+        if not project_dir.exists():
+            return None
+        
+        # Parse started_at timestamp
+        try:
+            target_time = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S").timestamp()
+        except:
+            return None
+        
+        # Find JSONL file with closest mtime within 1 hour window
+        jsonl_files = list(project_dir.glob("*.jsonl"))
+        if not jsonl_files:
+            return None
+        
+        best_match = None
+        best_diff = float('inf')
+        
+        for jsonl_file in jsonl_files:
+            mtime = jsonl_file.stat().st_mtime
+            diff = abs(mtime - target_time)
+            if diff < best_diff and diff < 3600:  # Within 1 hour
+                best_diff = diff
+                best_match = jsonl_file
+        
+        return best_match
     
     def compose(self) -> ComposeResult:
         yield Input(placeholder="Search...", id="search")
