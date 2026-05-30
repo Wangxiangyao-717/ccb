@@ -103,25 +103,109 @@ ccb up
 
 ## Data Model
 
-### Session File (`.codex-session*`)
+### Session Files
 
-Session files already record provider session IDs (e.g., `codex_session_id`). We add `claude_session_id` (JSONL UUID) so resume can directly locate the correct Claude conversation.
+Each provider creates its own session file. They are linked by the same `session_id` (CCB session ID).
 
-```python
+```
+.codex-session      → codex_session_id, codex_session_path
+.gemini-session     → gemini_session_id (if gemini provider used)
+.opencode-session   → opencode_session_id (if opencode provider used)
+```
+
+Example (same CCB session, three files):
+```
+.codex-session-6:
 {
-    "session_id": "ai-1716890000-12345",  # CCB session ID
-    "claude_session_id": "a75f14a4-5063-4033-9275-84aff9a8f815",  # Claude JSONL UUID (新增)
+    "session_id": "ai-1779953764-49764",
+    "claude_session_id": "a75f14a4-5063-4033-9275-84aff9a8f815",  # Written to ALL provider files
+    "codex_session_id": "019ddea0-6a6a-7cd3-9d15-507fae103b58",
+    "codex_session_path": "C:\\...\\rollout-...jsonl",
     "started_at": "2026-05-29 10:47:30",
-    "ended_at": "2026-05-29 11:30:15",    # None if still active
     "work_dir": "E:\\ccb",
-    "pane_id": "123",
-    "pane_title_marker": "CCB-Codex-ai-1716890000-12345",
-    "codex_session_id": "019ddea0-6a6a-7cd3-9d15-507fae103b58",  # Codex UUID (已有)
-    "codex_session_path": "C:\\...\\rollout-...jsonl",            # Codex session file (已有)
-    "gemini_session_id": "...",  # Gemini session ID (if gemini provider used)
-    "opencode_session_id": "..." # OpenCode session ID (if opencode provider used)
+    ...
+}
+
+.gemini-session-6:
+{
+    "session_id": "ai-1779953764-49764",     # Same CCB session ID
+    "claude_session_id": "a75f14a4-...",      # Same Claude UUID (written to all files)
+    "gemini_session_id": "...",
+    "started_at": "2026-05-29 10:47:30",
+    ...
 }
 ```
+
+### Resume Selector Data Collection
+
+The selector scans ALL provider session files, groups them by `session_id`:
+
+```python
+def _load_sessions(self) -> list[dict]:
+    """Scan all provider session files and group by CCB session_id."""
+    # Collect all provider session files
+    all_files = []
+    for provider in ["codex", "gemini", "opencode"]:
+        all_files.extend(self.work_dir.glob(f".{provider}-session*"))
+    
+    # Group by session_id
+    groups: dict[str, dict] = {}
+    for session_file in all_files:
+        try:
+            data = json.loads(session_file.read_text(encoding="utf-8"))
+            sid = data.get("session_id", "")
+            if not sid:
+                continue
+            
+            if sid not in groups:
+                groups[sid] = {
+                    "session_id": sid,
+                    "started_at": data.get("started_at", ""),
+                    "providers": [],
+                    "claude_session_id": data.get("claude_session_id"),
+                    "session_files": {},  # provider -> file path
+                }
+            
+            # Detect which provider this file belongs to
+            provider = self._detect_provider(session_file, data)
+            if provider and provider not in groups[sid]["providers"]:
+                groups[sid]["providers"].append(provider)
+                groups[sid]["session_files"][provider] = session_file
+                
+                # Merge claude_session_id from any file that has it
+                if not groups[sid]["claude_session_id"]:
+                    groups[sid]["claude_session_id"] = data.get("claude_session_id")
+                    
+        except Exception:
+            continue
+    
+    # Convert to list and sort
+    sessions = list(groups.values())
+    sessions.sort(key=lambda s: s["started_at"], reverse=True)
+    
+    # Load first user message for each session
+    for session in sessions:
+        jsonl_path = self._get_jsonl_path(session)
+        if jsonl_path:
+            messages = extract_user_messages(jsonl_path)
+            if messages:
+                session["first_message"] = messages[0][:40] + "..." if len(messages[0]) > 40 else messages[0]
+    
+    return sessions
+```
+
+### Resume Flow
+
+When user selects a session and presses Enter:
+
+1. Get the selected `session_id`
+2. Find all provider files with that `session_id`
+3. From those files, extract:
+   - `claude_session_id` → `claude --resume <uuid>`
+   - `codex_session_id` → `codex resume <uuid>`
+   - `gemini_session_id` → `gemini --resume <id>`
+   - `opencode_session_id` → `opencode --continue <id>`
+4. Only resume providers that the user requested in `ccb up -r [providers...]`
 
 ### Recording Claude Session UUID
 
@@ -298,49 +382,67 @@ class ResumeSelectorApp(App):
         self.selected_session_id = None
     
     def _load_sessions(self) -> list[dict]:
-        """Scan directory for .codex-session* files and extract metadata."""
-        sessions = []
-        for session_file in sorted(self.work_dir.glob(".codex-session*")):
+        """Scan all provider session files and group by CCB session_id."""
+        # Collect all provider session files
+        all_files = []
+        for provider in ["codex", "gemini", "opencode"]:
+            all_files.extend(self.work_dir.glob(f".{provider}-session*"))
+        
+        # Group by session_id
+        groups: dict[str, dict] = {}
+        for session_file in all_files:
             try:
                 data = json.loads(session_file.read_text(encoding="utf-8"))
-                session_id = data.get("session_id", "")
-                started_at = data.get("started_at", "")
+                sid = data.get("session_id", "")
+                if not sid:
+                    continue
                 
-                # Detect providers by scanning ALL numbered session files for this session_id
-                providers = []
-                for provider in ["codex", "gemini", "opencode"]:
-                    for provider_file in self.work_dir.glob(f".{provider}-session*"):
-                        try:
-                            pdata = json.loads(provider_file.read_text(encoding="utf-8"))
-                            if pdata.get("session_id") == session_id:
-                                providers.append(provider)
-                                break
-                        except:
-                            pass
+                if sid not in groups:
+                    groups[sid] = {
+                        "session_id": sid,
+                        "started_at": data.get("started_at", ""),
+                        "providers": [],
+                        "claude_session_id": data.get("claude_session_id"),
+                        "session_files": {},  # provider -> file path
+                    }
                 
-                # Find matching JSONL file: direct lookup by claude_session_id, or mtime fallback for legacy sessions
-                jsonl_path = self._get_jsonl_path(data)
-                first_message = ""
-                if jsonl_path:
-                    messages = extract_user_messages(jsonl_path)
-                    if messages:
-                        first_message = messages[0][:40] + "..." if len(messages[0]) > 40 else messages[0]
-                
-                sessions.append({
-                    "session_id": session_id,
-                    "started_at": started_at,
-                    "providers": providers,
-                    "first_message": first_message,
-                    "jsonl_path": jsonl_path,
-                    "session_file": session_file,
-                })
-            except Exception as e:
-                # Skip malformed session files
+                # Detect which provider this file belongs to
+                provider = self._detect_provider(session_file)
+                if provider and provider not in groups[sid]["providers"]:
+                    groups[sid]["providers"].append(provider)
+                    groups[sid]["session_files"][provider] = session_file
+                    
+                    # Merge claude_session_id from any file that has it
+                    if not groups[sid]["claude_session_id"]:
+                        groups[sid]["claude_session_id"] = data.get("claude_session_id")
+                        
+            except Exception:
                 continue
         
-        # Sort by started_at descending (newest first)
+        # Convert to list and sort by started_at descending (newest first)
+        sessions = list(groups.values())
         sessions.sort(key=lambda s: s["started_at"], reverse=True)
+        
+        # Load first user message for each session
+        for session in sessions:
+            jsonl_path = self._get_jsonl_path(session)
+            if jsonl_path:
+                messages = extract_user_messages(jsonl_path)
+                if messages:
+                    session["first_message"] = messages[0][:40] + "..." if len(messages[0]) > 40 else messages[0]
+        
         return sessions
+    
+    def _detect_provider(self, session_file: Path) -> str:
+        """Detect provider from session file name."""
+        name = session_file.name
+        if name.startswith(".codex-session"):
+            return "codex"
+        elif name.startswith(".gemini-session"):
+            return "gemini"
+        elif name.startswith(".opencode-session"):
+            return "opencode"
+        return ""
     
     def _get_jsonl_path(self, session_data: dict) -> Optional[Path]:
         """Get Claude JSONL path from session data.
@@ -621,32 +723,41 @@ def _start_claude(self) -> int:
     # ... existing code ...
     
     if self.resume:
-        if self.resume_session_id:
-            # Use selected session from TUI
-            session_file = self._find_session_file_by_ccb_id(self.resume_session_id)
-            if session_file:
-                session_data = self._read_json_file(session_file)
-                claude_uuid = session_data.get("claude_session_id")
+        # Load session data (collects from all provider files)
+        self.resume_session_data = self._load_resume_session_data()
+        
+        if self.resume_session_data:
+            claude_uuid = self.resume_session_data.get("claude_session_id")
+            
+            if claude_uuid:
+                # Direct resume with UUID
+                cmd.extend(["--resume", claude_uuid])
+                print(f"🔁 Resuming Claude session {claude_uuid[:8]}...")
+            else:
+                # Legacy session without claude_session_id - try mtime fallback
+                started_at = None
+                # Find started_at from any provider file
+                for provider_file in self.resume_session_data.get("session_files", {}).values():
+                    data = self._read_json_file(provider_file)
+                    if data and data.get("started_at"):
+                        started_at = data.get("started_at")
+                        break
                 
-                if claude_uuid:
-                    # Direct resume with UUID
-                    cmd.extend(["--resume", claude_uuid])
-                    print(f"🔁 Resuming Claude session {claude_uuid[:8]}...")
-                else:
-                    # Legacy session without claude_session_id - try mtime fallback
-                    started_at = session_data.get("started_at")
-                    legacy_uuid = self._find_jsonl_uuid_by_mtime(started_at) if started_at else None
+                legacy_uuid = self._find_jsonl_uuid_by_mtime(started_at) if started_at else None
+                
+                if legacy_uuid:
+                    cmd.extend(["--resume", legacy_uuid])
+                    print(f"🔁 Resuming Claude session {legacy_uuid[:8]} (found via mtime)...")
                     
-                    if legacy_uuid:
-                        cmd.extend(["--resume", legacy_uuid])
-                        print(f"🔁 Resuming Claude session {legacy_uuid[:8]} (found via mtime)...")
-                        
-                        # Record the UUID for future use
-                        session_data["claude_session_id"] = legacy_uuid
-                        self._write_json_file(session_file, session_data)
-                    else:
-                        cmd.append("--continue")
-                        print(f"⚠️ Could not find matching session, resuming latest...")
+                    # Record the UUID for future use in all provider files
+                    for provider_file in self.resume_session_data.get("session_files", {}).values():
+                        data = self._read_json_file(provider_file)
+                        if data:
+                            data["claude_session_id"] = legacy_uuid
+                            self._write_json_file(provider_file, data)
+                else:
+                    cmd.append("--continue")
+                    print(f"⚠️ Could not find matching session, resuming latest...")
         else:
             # Fallback to latest (existing behavior)
             _, has_history = self._get_latest_claude_session_id()
@@ -676,73 +787,79 @@ def _start_claude(self) -> int:
 
 ### Provider Resume Logic
 
-When resuming a selected session, each provider uses its recorded session ID.
-
-**Wiring points (matching actual code paths):**
-
-The actual call chain is:
-```
-run_up() -> _start_provider() -> _start_provider_wezterm/_tmux/_iterm2() -> _get_start_cmd(provider)
-```
-
-To pass `session_data` through this chain, we store it as an instance variable in `AILauncher`:
+When resuming a selected session, each provider's session ID is read from its own session file:
 
 ```python
-def __init__(
-    self,
-    providers: list,
-    resume: bool = False,
-    resume_session_id: Optional[str] = None,
-    auto: bool = False,
-    claude_cmd: str = None,
-):
-    # ... existing code ...
-    self.session_start_time = time.time()
-    self.resume_session_data = None  # Will be loaded if resuming
-```
-
-Then in `run_up()`:
-
-```python
-def run_up(self) -> int:
-    # ... existing code ...
+def _load_resume_session_data(self) -> Optional[dict]:
+    """Load session data for the selected CCB session.
     
-    # If resuming with selected session, load its data once
-    if self.resume and self.resume_session_id:
-        session_file = self._find_session_file_by_ccb_id(self.resume_session_id)
-        if session_file:
-            self.resume_session_data = self._read_json_file(session_file)
+    Returns a dict with:
+    - session_id: CCB session ID
+    - claude_session_id: Claude JSONL UUID (from any provider file that has it)
+    - session_files: {provider: path} mapping
+    """
+    if not self.resume or not self.resume_session_id:
+        return None
     
-    # ... rest of run_up() continues as before ...
+    # Find all provider files for this session_id
+    session_files = {}
+    claude_session_id = None
+    
+    for provider in ["codex", "gemini", "opencode"]:
+        for f in Path.cwd().glob(f".{provider}-session*"):
+            try:
+                data = self._read_json_file(f)
+                if data.get("session_id") == self.resume_session_id:
+                    session_files[provider] = f
+                    if not claude_session_id:
+                        claude_session_id = data.get("claude_session_id")
+                    break
+            except:
+                continue
+    
+    if not session_files:
+        return None
+    
+    return {
+        "session_id": self.resume_session_id,
+        "claude_session_id": claude_session_id,
+        "session_files": session_files,
+    }
+
+def _get_provider_session_id(self, provider: str) -> Optional[str]:
+    """Read provider-specific session ID from its session file."""
+    if not self.resume_session_data:
+        return None
+    
+    session_file = self.resume_session_data.get("session_files", {}).get(provider)
+    if not session_file or not session_file.exists():
+        return None
+    
+    data = self._read_json_file(session_file)
+    if not data:
+        return None
+    
+    # Each provider file has its own session ID field
+    key = f"{provider}_session_id"
+    return data.get(key)
 ```
 
-Now `_get_start_cmd()` can access `self.resume_session_data`:
+Updated `_build_codex_start_cmd()`:
 
 ```python
-def _get_start_cmd(self, provider: str) -> str:
-    """Get start command for provider, using recorded session ID if resuming."""
-    if provider == "codex":
-        return self._build_codex_start_cmd()
-    elif provider == "gemini":
-        return self._build_gemini_start_cmd()
-    elif provider == "opencode":
-        return self._build_opencode_start_cmd()
-    # ... etc ...
-
 def _build_codex_start_cmd(self) -> str:
     """Build Codex start command, using recorded session ID if resuming."""
     cmd = "codex -c=disable_paste_burst=true --dangerously-bypass-approvals-and-sandbox" if self.auto else "codex -c=disable_paste_burst=true"
     
     # Check if we have recorded session data
-    if self.resume and self.resume_session_data:
-        codex_uuid = self.resume_session_data.get("codex_session_id")
+    if self.resume:
+        codex_uuid = self._get_provider_session_id("codex")
         if codex_uuid:
             cmd = f"{cmd} resume {codex_uuid}"
             print(f"🔁 Resuming Codex session {codex_uuid[:8]}...")
             return cmd
-    
-    # Fallback: try to find latest session (existing logic)
-    if self.resume:
+        
+        # Fallback: try to find latest session (existing logic)
         session_id, has_history = self._get_latest_codex_session_id()
         if session_id:
             cmd = f"{cmd} resume {session_id}"
@@ -751,18 +868,21 @@ def _build_codex_start_cmd(self) -> str:
             print(f"ℹ️ {t('no_history_fresh', provider='Codex')}")
     
     return cmd
+```
 
-# Similar logic for Gemini and OpenCode:
+Similarly for Gemini and OpenCode:
+
+```python
 def _build_gemini_start_cmd(self) -> str:
-    if self.resume and self.resume_session_data:
-        gemini_id = self.resume_session_data.get("gemini_session_id")
+    if self.resume:
+        gemini_id = self._get_provider_session_id("gemini")
         if gemini_id:
             return f"gemini --resume {gemini_id}"
     # Fallback to existing logic...
 
 def _build_opencode_start_cmd(self) -> str:
-    if self.resume and self.resume_session_data:
-        opencode_id = self.resume_session_data.get("opencode_session_id")
+    if self.resume:
+        opencode_id = self._get_provider_session_id("opencode")
         if opencode_id:
             return f"opencode --continue {opencode_id}"
     # Fallback to existing logic...
