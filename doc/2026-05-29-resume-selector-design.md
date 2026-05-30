@@ -395,8 +395,11 @@ class ResumeSelectorApp(App):
             if project_dir.exists():
                 return project_dir
         
-        # Fallback to best-effort key
-        fallback_path = self.work_dir.resolve() if self.work_dir.resolve().exists() else self.work_dir
+        # Fallback to best-effort key (match ccb's try/except pattern)
+        try:
+            fallback_path = self.work_dir.resolve()
+        except Exception:
+            fallback_path = self.work_dir
         key = re.sub(r"[^A-Za-z0-9]", "-", str(fallback_path))
         return projects_root / key
     
@@ -551,6 +554,43 @@ def _find_session_file_by_ccb_id(self, ccb_session_id: str) -> Optional[Path]:
             continue
     return None
 
+def _find_jsonl_uuid_by_mtime(self, started_at: str) -> Optional[str]:
+    """Find Claude JSONL UUID by matching started_at timestamp.
+    
+    This is a fallback for legacy sessions that don't have claude_session_id recorded.
+    """
+    from datetime import datetime
+    
+    project_dir = self._claude_project_dir(Path.cwd())
+    if not project_dir.exists():
+        return None
+    
+    # Parse started_at timestamp
+    try:
+        target_time = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S").timestamp()
+    except:
+        return None
+    
+    # Find JSONL files
+    jsonl_files = list(project_dir.glob("*.jsonl"))
+    if not jsonl_files:
+        return None
+    
+    # Find closest match within 1 hour window
+    best_match = None
+    best_diff = float('inf')
+    
+    for jsonl_file in jsonl_files:
+        mtime = jsonl_file.stat().st_mtime
+        diff = abs(mtime - target_time)
+        if diff < best_diff and diff < 3600:  # Within 1 hour
+            best_diff = diff
+            best_match = jsonl_file
+    
+    if best_match:
+        return best_match.stem  # Return UUID without .jsonl extension
+    return None
+
 def _detect_new_claude_session(self) -> Optional[str]:
     """Find the newest JSONL file created during this CCB session."""
     project_dir = self._claude_project_dir(Path.cwd())
@@ -587,14 +627,26 @@ def _start_claude(self) -> int:
             if session_file:
                 session_data = self._read_json_file(session_file)
                 claude_uuid = session_data.get("claude_session_id")
+                
                 if claude_uuid:
                     # Direct resume with UUID
                     cmd.extend(["--resume", claude_uuid])
                     print(f"🔁 Resuming Claude session {claude_uuid[:8]}...")
                 else:
-                    # Fallback: old session without claude_session_id
-                    cmd.append("--continue")
-                    print(f"🔁 Resuming latest Claude session (no UUID recorded)...")
+                    # Legacy session without claude_session_id - try mtime fallback
+                    started_at = session_data.get("started_at")
+                    legacy_uuid = self._find_jsonl_uuid_by_mtime(started_at) if started_at else None
+                    
+                    if legacy_uuid:
+                        cmd.extend(["--resume", legacy_uuid])
+                        print(f"🔁 Resuming Claude session {legacy_uuid[:8]} (found via mtime)...")
+                        
+                        # Record the UUID for future use
+                        session_data["claude_session_id"] = legacy_uuid
+                        self._write_json_file(session_file, session_data)
+                    else:
+                        cmd.append("--continue")
+                        print(f"⚠️ Could not find matching session, resuming latest...")
         else:
             # Fallback to latest (existing behavior)
             _, has_history = self._get_latest_claude_session_id()
