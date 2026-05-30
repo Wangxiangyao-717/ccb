@@ -221,7 +221,9 @@ def extract_user_messages(session_file: Path) -> list[str]:
 
 ### Session-to-JSONL Mapping
 
-The `claude_session_id` field in `.codex-session*` files directly contains the Claude JSONL UUID. No mtime guessing needed.
+The `claude_session_id` field in `.codex-session*` files directly contains the Claude JSONL UUID. For new sessions, this provides direct lookup without mtime guessing.
+
+For legacy session files (created before this feature was added), we fall back to mtime matching as a best-effort approach.
 
 ```python
 def _get_jsonl_path(session_data: dict) -> Optional[Path]:
@@ -353,7 +355,7 @@ class ResumeSelectorApp(App):
                         except:
                             pass
                 
-                # Find matching JSONL file using claude_session_id (direct lookup, no mtime guessing)
+                # Find matching JSONL file: direct lookup by claude_session_id, or mtime fallback for legacy sessions
                 jsonl_path = self._get_jsonl_path(data)
                 first_message = ""
                 if jsonl_path:
@@ -403,13 +405,36 @@ class ResumeSelectorApp(App):
     def _get_claude_project_dir(self) -> Path:
         """Get Claude project directory for current working directory.
         
-        This is a simplified version of AILauncher._claude_project_dir().
+        This matches the logic in AILauncher._claude_project_dir().
+        Claude uses a filesystem-friendly key derived from the working directory path.
         """
         from pathlib import Path
-        work_dir = str(self.work_dir.resolve())
-        # Claude uses hash of project path
-        project_hash = hashlib.sha256(work_dir.encode()).hexdigest()[:16]
-        return Path.home() / ".claude" / "projects" / project_hash
+        import re
+        
+        projects_root = Path.home() / ".claude" / "projects"
+        
+        # Try multiple candidates to handle symlinked paths
+        candidates = []
+        env_pwd = os.environ.get("PWD")
+        if env_pwd:
+            candidates.append(Path(env_pwd))
+        candidates.append(self.work_dir)
+        try:
+            candidates.append(self.work_dir.resolve())
+        except Exception:
+            pass
+        
+        # Find existing project directory
+        for candidate in candidates:
+            key = re.sub(r"[^A-Za-z0-9]", "-", str(candidate))
+            project_dir = projects_root / key
+            if project_dir.exists():
+                return project_dir
+        
+        # Fallback to best-effort key
+        fallback_path = self.work_dir.resolve() if self.work_dir.resolve().exists() else self.work_dir
+        key = re.sub(r"[^A-Za-z0-9]", "-", str(fallback_path))
+        return projects_root / key
     
     def _find_jsonl_by_mtime(self, started_at: str) -> Optional[Path]:
         """Find JSONL file by matching started_at timestamp.
