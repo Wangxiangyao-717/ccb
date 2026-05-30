@@ -199,13 +199,16 @@ def _load_sessions(self) -> list[dict]:
 When user selects a session and presses Enter:
 
 1. Get the selected `session_id`
-2. Find all provider files with that `session_id`
-3. From those files, extract:
+2. **Early load**: Call `_load_resume_session_data()` to collect all provider session data before starting any processes
+3. Find all provider files with that `session_id`
+4. From those files, extract:
    - `claude_session_id` → `claude --resume <uuid>`
    - `codex_session_id` → `codex resume <uuid>`
    - `gemini_session_id` → `gemini --resume <id>`
    - `opencode_session_id` → `opencode --continue <id>`
-4. Only resume providers that the user requested in `ccb up -r [providers...]`
+5. Only resume providers that the user requested in `ccb up -r [providers...]`
+
+**Important**: `self.resume_session_data` must be loaded BEFORE providers start, because `_build_*_start_cmd()` methods need to access provider session IDs when generating startup commands.
 
 ### Recording Claude Session UUID
 
@@ -827,7 +830,10 @@ def _load_resume_session_data(self) -> Optional[dict]:
     }
 
 def _get_provider_session_id(self, provider: str) -> Optional[str]:
-    """Read provider-specific session ID from its session file."""
+    """Read provider-specific session ID from its session file.
+    
+    For OpenCode, handles legacy field names for backward compatibility.
+    """
     if not self.resume_session_data:
         return None
     
@@ -841,7 +847,38 @@ def _get_provider_session_id(self, provider: str) -> Optional[str]:
     
     # Each provider file has its own session ID field
     key = f"{provider}_session_id"
-    return data.get(key)
+    session_id = data.get(key)
+    
+    # OpenCode backward compatibility: check legacy field names
+    if provider == "opencode" and not session_id:
+        session_id = data.get("opencode_storage_session_id") or data.get("session_id")
+    
+    return session_id
+```
+
+**Execution Order**:
+
+The implementation must ensure `self.resume_session_data` is loaded before providers start:
+
+```python
+def run_up(self) -> int:
+    # ... existing early code ...
+    
+    # CRITICAL: Load resume session data BEFORE starting providers
+    if self.resume and self.resume_session_id:
+        self.resume_session_data = self._load_resume_session_data()
+    
+    # Now start providers (they can access self.resume_session_data)
+    for provider in self.providers:
+        if provider == "codex":
+            self._start_codex()
+        elif provider == "gemini":
+            self._start_gemini()
+        elif provider == "opencode":
+            self._start_opencode()
+    
+    # Finally start Claude
+    return self._start_claude()
 ```
 
 Updated `_build_codex_start_cmd()`:
