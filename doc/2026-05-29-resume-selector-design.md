@@ -726,8 +726,7 @@ def _start_claude(self) -> int:
     # ... existing code ...
     
     if self.resume:
-        # Load session data (collects from all provider files)
-        self.resume_session_data = self._load_resume_session_data()
+        # resume_session_data already loaded in run_up() before providers started
         
         if self.resume_session_data:
             claude_uuid = self.resume_session_data.get("claude_session_id")
@@ -850,8 +849,13 @@ def _get_provider_session_id(self, provider: str) -> Optional[str]:
     session_id = data.get(key)
     
     # OpenCode backward compatibility: check legacy field names
+    # Only accept legacy "session_id" if it starts with "ses_" (OpenCode's format)
     if provider == "opencode" and not session_id:
-        session_id = data.get("opencode_storage_session_id") or data.get("session_id")
+        session_id = data.get("opencode_storage_session_id")
+        if not session_id:
+            legacy = data.get("session_id")
+            if legacy and legacy.startswith("ses_"):
+                session_id = legacy
     
     return session_id
 ```
