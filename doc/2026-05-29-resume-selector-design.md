@@ -105,17 +105,93 @@ ccb up
 
 ### Session File (`.codex-session*`)
 
+Session files already record provider session IDs (e.g., `codex_session_id`). We add `claude_session_id` (JSONL UUID) so resume can directly locate the correct Claude conversation.
+
 ```python
 {
     "session_id": "ai-1716890000-12345",  # CCB session ID
+    "claude_session_id": "a75f14a4-5063-4033-9275-84aff9a8f815",  # Claude JSONL UUID (新增)
     "started_at": "2026-05-29 10:47:30",
     "ended_at": "2026-05-29 11:30:15",    # None if still active
     "work_dir": "E:\\ccb",
-    "providers": ["codex"],                # Extracted from file presence
     "pane_id": "123",
-    "pane_title_marker": "CCB-Codex-ai-1716890000-12345"
+    "pane_title_marker": "CCB-Codex-ai-1716890000-12345",
+    "codex_session_id": "019ddea0-6a6a-7cd3-9d15-507fae103b58",  # Codex UUID (已有)
+    "codex_session_path": "C:\\...\\rollout-...jsonl",            # Codex session file (已有)
+    "gemini_session_id": "...",  # Gemini session ID (if gemini provider used)
+    "opencode_session_id": "..." # OpenCode session ID (if opencode provider used)
 }
 ```
+
+### Recording Claude Session UUID
+
+When `ccb up` starts Claude, the JSONL file is created. We capture its UUID and write it back to the session file.
+
+In `_start_claude()`, after Claude subprocess starts:
+
+```python
+def _start_claude(self) -> int:
+    # ... existing code ...
+    
+    try:
+        returncode = subprocess.run(cmd, env=env).returncode
+        
+        # Record Claude session UUID after Claude exits
+        claude_uuid = self._detect_new_claude_session()
+        if claude_uuid:
+            for provider in self.providers:
+                session_file = self.session_files.get(provider)
+                if session_file and session_file.exists():
+                    data = self._read_json_file(session_file)
+                    data["claude_session_id"] = claude_uuid
+                    self._write_json_file(session_file, data)
+        
+        return returncode
+    except KeyboardInterrupt:
+        return 130
+
+def _detect_new_claude_session(self) -> Optional[str]:
+    """Find the newest JSONL file created during this CCB session.
+    
+    Note: This is a best-effort detection using mtime. In concurrent scenarios
+    (e.g., two CCB instances started at the same time in different tabs), this
+    may pick up the wrong JSONL file. This is acceptable because:
+    1. Concurrent CCB instances in the same directory are rare
+    2. The fallback is that claude_session_id remains None, and resume still
+       works via mtime matching in _get_latest_claude_session_id()
+    """
+    project_dir = self._claude_project_dir(Path.cwd())
+    if not project_dir.exists():
+        return None
+    
+    # Find JSONL files created after CCB started
+    jsonl_files = list(project_dir.glob("*.jsonl"))
+    ccb_start_time = self.session_start_time  # Record this in __init__
+    
+    new_sessions = [
+        f for f in jsonl_files 
+        if f.stat().st_mtime >= ccb_start_time
+        and f.stat().st_size > 0
+    ]
+    
+    if not new_sessions:
+        return None
+    
+    # Return the newest one (most likely ours)
+    latest = max(new_sessions, key=lambda f: f.stat().st_mtime)
+    return latest.stem  # UUID without .jsonl extension
+```
+
+**Note on provider session ID backfill timing:**
+
+The `gemini_session_id` and `opencode_session_id` fields are not written at session startup. They are backfilled later when the corresponding daemon (gaskd/oaskd) starts handling requests. This means:
+
+1. A freshly started session may not have these fields yet
+2. When resuming, if these fields are missing, we fall back to the existing "resume latest" logic
+3. This is acceptable because:
+   - Most sessions that have been used will have these fields populated
+   - The fallback is safe (resumes the latest session, which is usually correct)
+   - We can improve this in the future by writing provider session IDs at startup if needed
 
 ### User Message Extraction
 
@@ -144,37 +220,46 @@ def extract_user_messages(session_file: Path) -> list[str]:
 
 ### Session-to-JSONL Mapping
 
-Match `.codex-session` to Claude's `.jsonl` file using the existing `_claude_project_dir()` helper from `ccb`:
+The `claude_session_id` field in `.codex-session*` files directly contains the Claude JSONL UUID. No mtime guessing needed.
 
 ```python
-def _find_jsonl_for_session(session_id: str, started_at: str) -> Optional[Path]:
-    """Find the Claude JSONL file matching this session."""
-    # Use existing CCB helper to get project directory
+def _get_jsonl_path(session_data: dict) -> Optional[Path]:
+    """Get Claude JSONL path from session data."""
+    claude_uuid = session_data.get("claude_session_id")
+    if not claude_uuid:
+        return None
+    
+    project_dir = _claude_project_dir(Path.cwd())
+    jsonl_file = project_dir / f"{claude_uuid}.jsonl"
+    
+    if jsonl_file.exists():
+        return jsonl_file
+    return None
+```
+
+For old session files without `claude_session_id`, fall back to mtime matching (best effort):
+
+```python
+def _find_jsonl_for_legacy_session(started_at: str) -> Optional[Path]:
+    """Fallback: find JSONL by mtime for old sessions without claude_session_id."""
     project_dir = _claude_project_dir(Path.cwd())
     if not project_dir.exists():
         return None
     
-    # Find JSONL files and match by modification time closest to started_at
     jsonl_files = list(project_dir.glob("*.jsonl"))
     if not jsonl_files:
         return None
     
-    # Parse started_at timestamp
     try:
-        from datetime import datetime
         target_time = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S").timestamp()
     except:
         return None
     
-    # Find closest file by modification time (within 1 hour tolerance)
     closest = min(jsonl_files, key=lambda f: abs(f.stat().st_mtime - target_time))
     if abs(closest.stat().st_mtime - target_time) < 3600:
         return closest
-    
     return None
 ```
-
-**Note:** This approach uses modification time matching because CCB session files don't store the Claude session UUID. Future enhancement could add `claude_session_id` field to `.codex-session` for direct matching.
 
 ## Implementation
 
@@ -255,20 +340,20 @@ class ResumeSelectorApp(App):
                 session_id = data.get("session_id", "")
                 started_at = data.get("started_at", "")
                 
-                # Parse providers from available session files
+                # Detect providers by scanning ALL numbered session files for this session_id
                 providers = []
                 for provider in ["codex", "gemini", "opencode"]:
-                    provider_file = self.work_dir / f".{provider}-session"
-                    if provider_file.exists():
+                    for provider_file in self.work_dir.glob(f".{provider}-session*"):
                         try:
                             pdata = json.loads(provider_file.read_text(encoding="utf-8"))
                             if pdata.get("session_id") == session_id:
                                 providers.append(provider)
+                                break
                         except:
                             pass
                 
-                # Find matching JSONL file
-                jsonl_path = self._find_jsonl_for_session(session_id, started_at)
+                # Find matching JSONL file using claude_session_id (direct lookup, no mtime guessing)
+                jsonl_path = self._get_jsonl_path(data)
                 first_message = ""
                 if jsonl_path:
                     messages = extract_user_messages(jsonl_path)
@@ -291,38 +376,19 @@ class ResumeSelectorApp(App):
         sessions.sort(key=lambda s: s["started_at"], reverse=True)
         return sessions
     
-    def _find_jsonl_for_session(self, session_id: str, started_at: str) -> Optional[Path]:
-        """Find the Claude JSONL file matching this session."""
-        # Get project directory
-        from pathlib import Path
-        import hashlib
-        
-        project_dir_name = hashlib.sha256(str(self.work_dir).encode()).hexdigest()[:16]
-        claude_projects = Path.home() / ".claude" / "projects"
-        project_dir = claude_projects / project_dir_name
-        
-        if not project_dir.exists():
+    def _get_jsonl_path(self, session_data: dict) -> Optional[Path]:
+        """Get Claude JSONL path from session data using claude_session_id."""
+        claude_uuid = session_data.get("claude_session_id")
+        if not claude_uuid:
             return None
         
-        # Find JSONL files and match by modification time closest to started_at
-        jsonl_files = list(project_dir.glob("*.jsonl"))
-        if not jsonl_files:
-            return None
+        # Use existing CCB helper to get project directory
+        from ccb import _claude_project_dir
+        project_dir = _claude_project_dir(self.work_dir)
+        jsonl_file = project_dir / f"{claude_uuid}.jsonl"
         
-        # Parse started_at timestamp
-        try:
-            from datetime import datetime
-            target_time = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S").timestamp()
-        except:
-            return None
-        
-        # Find closest file by modification time
-        closest = min(jsonl_files, key=lambda f: abs(f.stat().st_mtime - target_time))
-        
-        # Only return if within 1 hour of target time
-        if abs(closest.stat().st_mtime - target_time) < 3600:
-            return closest
-        
+        if jsonl_file.exists():
+            return jsonl_file
         return None
     
     def compose(self) -> ComposeResult:
@@ -422,7 +488,47 @@ def __init__(
     self.providers = providers or ["codex"]
     self.resume = resume
     self.resume_session_id = resume_session_id  # Store for later use
+    self.session_start_time = time.time()  # Record start time for UUID detection
     # ... rest of init
+```
+
+New helper methods in `AILauncher`:
+
+```python
+def _find_session_file_by_ccb_id(self, ccb_session_id: str) -> Optional[Path]:
+    """Find session file by CCB session ID."""
+    for session_file in Path.cwd().glob(".*-session*"):
+        if not session_file.is_file():
+            continue
+        try:
+            data = self._read_json_file(session_file)
+            if data.get("session_id") == ccb_session_id:
+                return session_file
+        except:
+            continue
+    return None
+
+def _detect_new_claude_session(self) -> Optional[str]:
+    """Find the newest JSONL file created during this CCB session."""
+    project_dir = self._claude_project_dir(Path.cwd())
+    if not project_dir.exists():
+        return None
+    
+    jsonl_files = list(project_dir.glob("*.jsonl"))
+    
+    # Find JSONL files created after CCB started
+    new_sessions = [
+        f for f in jsonl_files 
+        if f.stat().st_mtime >= self.session_start_time
+        and f.stat().st_size > 0
+    ]
+    
+    if not new_sessions:
+        return None
+    
+    # Return the newest one (most likely ours)
+    latest = max(new_sessions, key=lambda f: f.stat().st_mtime)
+    return latest.stem  # UUID without .jsonl extension
 ```
 
 Changes to `_start_claude()` (around line 1513):
@@ -433,16 +539,138 @@ def _start_claude(self) -> int:
     
     if self.resume:
         if self.resume_session_id:
-            # Use selected session ID from TUI
-            cmd.extend(["--resume", self.resume_session_id])
-            print(f"🔁 Resuming session {self.resume_session_id[:8]}")
+            # Use selected session from TUI
+            session_file = self._find_session_file_by_ccb_id(self.resume_session_id)
+            if session_file:
+                session_data = self._read_json_file(session_file)
+                claude_uuid = session_data.get("claude_session_id")
+                if claude_uuid:
+                    # Direct resume with UUID
+                    cmd.extend(["--resume", claude_uuid])
+                    print(f"🔁 Resuming Claude session {claude_uuid[:8]}...")
+                else:
+                    # Fallback: old session without claude_session_id
+                    cmd.append("--continue")
+                    print(f"🔁 Resuming latest Claude session (no UUID recorded)...")
         else:
             # Fallback to latest (existing behavior)
             _, has_history = self._get_latest_claude_session_id()
             if has_history:
                 cmd.append("--continue")
     
-    # ... rest of function
+    # ... rest of function ...
+    
+    try:
+        returncode = subprocess.run(cmd, env=env).returncode
+        
+        # Record Claude session UUID after Claude exits
+        if not self.resume:  # Only record for new sessions
+            claude_uuid = self._detect_new_claude_session()
+            if claude_uuid:
+                for provider in self.providers:
+                    session_file = self.session_files.get(provider)
+                    if session_file and session_file.exists():
+                        data = self._read_json_file(session_file)
+                        data["claude_session_id"] = claude_uuid
+                        self._write_json_file(session_file, data)
+        
+        return returncode
+    except KeyboardInterrupt:
+        return 130
+```
+
+### Provider Resume Logic
+
+When resuming a selected session, each provider uses its recorded session ID.
+
+**Wiring points (matching actual code paths):**
+
+The actual call chain is:
+```
+run_up() -> _start_provider() -> _start_provider_wezterm/_tmux/_iterm2() -> _get_start_cmd(provider)
+```
+
+To pass `session_data` through this chain, we store it as an instance variable in `AILauncher`:
+
+```python
+def __init__(
+    self,
+    providers: list,
+    resume: bool = False,
+    resume_session_id: Optional[str] = None,
+    auto: bool = False,
+    claude_cmd: str = None,
+):
+    # ... existing code ...
+    self.session_start_time = time.time()
+    self.resume_session_data = None  # Will be loaded if resuming
+```
+
+Then in `run_up()`:
+
+```python
+def run_up(self) -> int:
+    # ... existing code ...
+    
+    # If resuming with selected session, load its data once
+    if self.resume and self.resume_session_id:
+        session_file = self._find_session_file_by_ccb_id(self.resume_session_id)
+        if session_file:
+            self.resume_session_data = self._read_json_file(session_file)
+    
+    # ... rest of run_up() continues as before ...
+```
+
+Now `_get_start_cmd()` can access `self.resume_session_data`:
+
+```python
+def _get_start_cmd(self, provider: str) -> str:
+    """Get start command for provider, using recorded session ID if resuming."""
+    if provider == "codex":
+        return self._build_codex_start_cmd()
+    elif provider == "gemini":
+        return self._build_gemini_start_cmd()
+    elif provider == "opencode":
+        return self._build_opencode_start_cmd()
+    # ... etc ...
+
+def _build_codex_start_cmd(self) -> str:
+    """Build Codex start command, using recorded session ID if resuming."""
+    cmd = "codex -c=disable_paste_burst=true --dangerously-bypass-approvals-and-sandbox" if self.auto else "codex -c=disable_paste_burst=true"
+    
+    # Check if we have recorded session data
+    if self.resume and self.resume_session_data:
+        codex_uuid = self.resume_session_data.get("codex_session_id")
+        if codex_uuid:
+            cmd = f"{cmd} resume {codex_uuid}"
+            print(f"🔁 Resuming Codex session {codex_uuid[:8]}...")
+            return cmd
+    
+    # Fallback: try to find latest session (existing logic)
+    if self.resume:
+        session_id, has_history = self._get_latest_codex_session_id()
+        if session_id:
+            cmd = f"{cmd} resume {session_id}"
+            print(f"🔁 {t('resuming_session', provider='Codex', session_id=session_id[:8])}")
+        else:
+            print(f"ℹ️ {t('no_history_fresh', provider='Codex')}")
+    
+    return cmd
+
+# Similar logic for Gemini and OpenCode:
+def _build_gemini_start_cmd(self) -> str:
+    if self.resume and self.resume_session_data:
+        gemini_id = self.resume_session_data.get("gemini_session_id")
+        if gemini_id:
+            return f"gemini --resume {gemini_id}"
+    # Fallback to existing logic...
+
+def _build_opencode_start_cmd(self) -> str:
+    if self.resume and self.resume_session_data:
+        opencode_id = self.resume_session_data.get("opencode_session_id")
+        if opencode_id:
+            return f"opencode --continue {opencode_id}"
+    # Fallback to existing logic...
 ```
 
 ## Dependencies
