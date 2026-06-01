@@ -203,19 +203,23 @@ class CodexProjectSession:
             return False, "Terminal backend not available"
 
         pane_id = self.pane_id
-        if pane_id and backend.is_alive(pane_id):
-            return True, pane_id
-
         marker = self.pane_title_marker
         resolver = getattr(backend, "find_pane_by_title_marker", None)
         resolved: Optional[str] = None
+
+        # Try marker resolution (title-based)
         if marker and callable(resolver):
             resolved = resolver(marker)
             if resolved and backend.is_alive(str(resolved)):
-                self.data["pane_id"] = str(resolved)
-                self.data["updated_at"] = _now_str()
-                self._write_back()
+                if str(resolved) != pane_id:
+                    self.data["pane_id"] = str(resolved)
+                    self.data["updated_at"] = _now_str()
+                    self._write_back()
                 return True, str(resolved)
+
+        # Fallback to pane_id only
+        if pane_id and backend.is_alive(pane_id):
+            return True, pane_id
 
         # tmux self-heal: if pane exists but is dead (remain-on-exit), respawn in-place.
         if self.terminal == "tmux":

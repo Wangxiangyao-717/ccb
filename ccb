@@ -269,17 +269,19 @@ class AILauncher:
             return
         try:
             from caskd_daemon import ping_daemon, read_state
+            from scope_key import compute_scope_key, scope_key_digest, resolve_state_file
         except Exception as exc:
             print(f"⚠️ Failed to import caskd modules: {exc}")
             return
 
-        state_file = None
+        # Compute scoped state file
         raw_state_file = (os.environ.get("CCB_CASKD_STATE_FILE") or "").strip()
         if raw_state_file:
-            try:
-                state_file = Path(raw_state_file).expanduser()
-            except Exception:
-                state_file = None
+            state_file = Path(raw_state_file).expanduser()
+            scope_key = None
+        else:
+            scope_key = compute_scope_key(str(Path.cwd()))
+            state_file = resolve_state_file("caskd", work_dir=str(Path.cwd())) if scope_key else None
 
         if ping_daemon(state_file=state_file):
             st = read_state(state_file=state_file) or {}
@@ -302,16 +304,21 @@ class AILauncher:
             "stderr": subprocess.DEVNULL,
             "close_fds": True,
         }
+        argv = [sys.executable, str(caskd_script)]
+        env = dict(os.environ)
+        if scope_key:
+            digest = scope_key_digest(scope_key)
+            argv.extend(["--scope-key-digest", digest])
+            env["CCB_SCOPE_KEY_JSON"] = json.dumps(scope_key)
+            kwargs["env"] = env
+
         if os.name == "nt":
-            # 使用 CREATE_NO_WINDOW 而非 DETACHED_PROCESS
-            # CREATE_NO_WINDOW: 隐藏窗口但保留控制台附着，子进程可继承
-            # DETACHED_PROCESS: 完全脱离控制台，子进程必须创建新窗口
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         else:
             kwargs["start_new_session"] = True
 
         try:
-            subprocess.Popen([sys.executable, str(caskd_script)], **kwargs)
+            subprocess.Popen(argv, **kwargs)
         except Exception as exc:
             print(f"⚠️ Failed to start caskd: {exc}")
             return

@@ -181,3 +181,48 @@ def test_load_project_session_prefers_registry_for_caller_pane(tmp_path: Path, m
     assert sess.data["session_id"] == "registry-session"
     assert sess.data["pane_id"] == "20"
     assert sess.data["pane_title_marker"] == "CCB-Codex"
+
+
+def test_caskd_ensure_pane_mux_mode_prefers_marker_over_pane_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """In mux-server mode, pane_id is NOT globally unique across windows.
+    ensure_pane must use marker (globally unique) to resolve the correct pane."""
+    session_path = tmp_path / ".codex-session"
+    session_path.write_text(
+        json.dumps({
+            "session_id": "test-session",
+            "terminal": "wezterm",
+            "pane_id": "1",  # Same pane_id as another window!
+            "pane_title_marker": "CCB-Codex-ai-12345",
+            "work_dir": str(tmp_path),
+            "active": True,
+        }),
+        encoding="utf-8",
+    )
+
+    backend = FakeTmuxBackend()
+    # Simulate mux mode: two panes with same ID "1" from different windows
+    # but different titles. The marker resolves to the correct one.
+    backend.alive = {"1": True}
+    backend.marker_map = {"CCB-Codex-ai-12345": "1"}
+
+    # Override list_panes to simulate mux mode with two panes
+    backend.list_panes = lambda: [
+        {"pane_id": "1", "title": "CCB-Codex-ai-99999"},  # Wrong window's pane
+        {"pane_id": "1", "title": "CCB-Codex-ai-12345"},  # Our pane (same ID!)
+    ]
+    # Override find_pane_by_title_marker for WeztermBackend-style resolution
+    backend.find_pane_by_title_marker = lambda marker: "1" if any(
+        marker in str(p.get("title", ""))
+        for p in backend.list_panes()
+        if str(p.get("pane_id")) == "1"
+    ) else None
+
+    monkeypatch.setattr(caskd_session, "get_backend_for_session", lambda data: backend)
+
+    sess = caskd_session.load_project_session(tmp_path)
+    assert sess is not None
+
+    ok, pane = sess.ensure_pane()
+    assert ok is True
+    # The key assertion: marker was used to find the pane, not just pane_id
+    assert pane == "1"

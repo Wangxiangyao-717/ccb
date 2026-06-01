@@ -15,17 +15,20 @@ def read_state(state_file: Path) -> dict | None:
         return None
 
 
-def ping_daemon(protocol_prefix: str, timeout_s: float, state_file: Path) -> bool:
-    st = read_state(state_file)
-    if not st:
+def ping_daemon(protocol_prefix: str, timeout_s: float = 0.5, state_file: Path = None,
+                host: str = None, port: int = None, token: str = None) -> bool:
+    """Ping daemon. Either read from state_file or use direct host/port/token."""
+    if state_file is not None:
+        st = read_state(state_file)
+        if not st:
+            return False
+        host = st.get("connect_host") or st.get("host")
+        port = st.get("port")
+        token = st.get("token")
+    if not (host and port and token):
         return False
     try:
-        host = st.get("connect_host") or st["host"]
-        port = int(st["port"])
-        token = st["token"]
-    except Exception:
-        return False
-    try:
+        port = int(port)
         with socket.create_connection((host, port), timeout=timeout_s) as sock:
             req = {"type": f"{protocol_prefix}.ping", "v": 1, "id": "ping", "token": token}
             sock.sendall((json.dumps(req) + "\n").encode("utf-8"))

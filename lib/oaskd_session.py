@@ -110,18 +110,22 @@ class OpenCodeProjectSession:
             return False, "Terminal backend not available"
 
         pane_id = self.pane_id
-        if pane_id and backend.is_alive(pane_id):
-            return True, pane_id
-
         marker = self.pane_title_marker
         resolver = getattr(backend, "find_pane_by_title_marker", None)
+
+        # Try marker resolution (title-based)
         if marker and callable(resolver):
             resolved = resolver(marker)
             if resolved and backend.is_alive(str(resolved)):
-                self.data["pane_id"] = str(resolved)
-                self.data["updated_at"] = _now_str()
-                self._write_back()
+                if str(resolved) != pane_id:
+                    self.data["pane_id"] = str(resolved)
+                    self.data["updated_at"] = _now_str()
+                    self._write_back()
                 return True, str(resolved)
+
+        # Fallback to pane_id only
+        if pane_id and backend.is_alive(pane_id):
+            return True, pane_id
 
         if self.terminal == "tmux":
             start_cmd = self.start_cmd

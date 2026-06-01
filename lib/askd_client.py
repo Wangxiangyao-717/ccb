@@ -13,6 +13,8 @@ from typing import Optional, Tuple
 from env_utils import env_bool
 from providers import ProviderClientSpec
 from session_utils import find_project_session_file
+from scope_key import compute_scope_key, scope_key_digest, resolve_state_file
+from askd_server import _compare_and_delete_state
 
 
 def autostart_enabled(primary_env: str, legacy_env: str, default: bool = True) -> bool:
@@ -64,6 +66,15 @@ def try_daemon_request(spec: ProviderClientSpec, work_dir: Path, message: str, t
     ):
         return None
 
+    # Resolve scoped state file if no explicit override
+    if state_file is None:
+        env_override = (os.environ.get(spec.state_file_env) or "").strip()
+        state_file = resolve_state_file(
+            spec.daemon_bin_name,
+            env_override=env_override or None,
+            work_dir=str(work_dir),
+        )
+
     from importlib import import_module
     daemon_module = import_module(spec.daemon_module)
     read_state = getattr(daemon_module, "read_state")
@@ -71,11 +82,28 @@ def try_daemon_request(spec: ProviderClientSpec, work_dir: Path, message: str, t
     st = read_state(state_file=state_file)
     if not st:
         return None
+
+    # Validate scope_key_digest if present
+    scope_key = compute_scope_key(str(work_dir))
+    if scope_key:
+        expected_digest = scope_key_digest(scope_key)
+        state_digest = st.get("scope_key_digest")
+        if state_digest and state_digest != expected_digest:
+            # State belongs to a different scope - ignore
+            return None
+
+    # Ping-before-trust: verify daemon is actually alive
     try:
         host = st.get("connect_host") or st.get("host")
         port = int(st["port"])
         token = st["token"]
     except Exception:
+        return None
+
+    import askd_rpc
+    if not askd_rpc.ping_daemon(spec.protocol_prefix, timeout_s=0.3, host=host, port=port, token=token):
+        # Ping failed - clean stale state if token matches
+        _compare_and_delete_state(state_file, token)
         return None
 
     try:
@@ -153,11 +181,19 @@ def maybe_start_daemon(spec: ProviderClientSpec, work_dir: Path) -> bool:
         argv = [entry]
     else:
         argv = [sys.executable, entry]
+
+    # Compute scope_key and pass to daemon
+    scope_key = compute_scope_key(str(work_dir))
+    env = dict(os.environ)
+    if scope_key:
+        digest = scope_key_digest(scope_key)
+        argv.extend(["--scope-key-digest", digest])
+        env["CCB_SCOPE_KEY_JSON"] = json.dumps(scope_key)
+
     try:
         kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
+        kwargs["env"] = env
         if os.name == "nt":
-            # CREATE_NO_WINDOW: 隐藏窗口但保留控制台附着，子进程可继承 WezTerm 上下文
-            # DETACHED_PROCESS: 完全脱离控制台，会丢失 WezTerm cli 通信能力
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         else:
             kwargs["start_new_session"] = True
@@ -174,9 +210,14 @@ def wait_for_daemon_ready(spec: ProviderClientSpec, timeout_s: float = 2.0, stat
         ping_daemon = getattr(daemon_module, "ping_daemon")
     except Exception:
         return False
-    deadline = time.time() + max(0.1, float(timeout_s))
     if state_file is None:
-        state_file = state_file_from_env(spec.state_file_env)
+        env_override = (os.environ.get(spec.state_file_env) or "").strip()
+        state_file = resolve_state_file(
+            spec.daemon_bin_name,
+            env_override=env_override or None,
+            work_dir=str(Path.cwd()),
+        )
+    deadline = time.time() + max(0.1, float(timeout_s))
     while time.time() < deadline:
         try:
             if ping_daemon(timeout_s=0.2, state_file=state_file):

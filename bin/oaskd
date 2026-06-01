@@ -20,6 +20,8 @@ from compat import setup_windows_encoding
 setup_windows_encoding()
 
 from oaskd_daemon import OaskdServer, shutdown_daemon
+from scope_key import resolve_state_file, scope_key_digest
+import json
 
 
 def _parse_listen(value: str) -> tuple[str, int]:
@@ -36,17 +38,28 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="oask daemon (OpenCode)")
     ap.add_argument("--listen", default=os.environ.get("CCB_OASKD_LISTEN", "127.0.0.1:0"), help="host:port (default 127.0.0.1:0)")
     ap.add_argument("--state-file", default=os.environ.get("CCB_OASKD_STATE_FILE", ""), help="Override state file path")
+    ap.add_argument("--scope-key-digest", default=None, help="Scope digest for per-instance state file naming")
     ap.add_argument("--shutdown", action="store_true", help="Shutdown running daemon")
     args = ap.parse_args(argv[1:])
 
-    state_file = Path(args.state_file).expanduser() if args.state_file else None
+    scope_key_json = os.environ.get("CCB_SCOPE_KEY_JSON")
+    scope_key = json.loads(scope_key_json) if scope_key_json else None
+
+    if args.state_file:
+        state_file = Path(args.state_file).expanduser()
+    elif scope_key:
+        digest = args.scope_key_digest or scope_key_digest(scope_key)
+        from scope_key import scoped_state_file
+        state_file = scoped_state_file("oaskd", digest)
+    else:
+        state_file = None
 
     if args.shutdown:
         ok = shutdown_daemon(state_file=state_file)
         return 0 if ok else 1
 
     host, port = _parse_listen(args.listen)
-    server = OaskdServer(host=host, port=port, state_file=state_file)
+    server = OaskdServer(host=host, port=port, state_file=state_file, scope_key=scope_key)
     return server.serve_forever()
 
 

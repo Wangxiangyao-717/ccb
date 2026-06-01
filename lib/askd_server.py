@@ -12,9 +12,22 @@ from typing import Callable, Optional
 from askd_runtime import log_path, normalize_connect_host, run_dir, write_log
 from process_lock import ProviderLock
 from providers import ProviderDaemonSpec
+from scope_key import scope_key_digest as _compute_scope_digest
 from session_utils import safe_write_session
 
 RequestHandler = Callable[[dict], dict]
+
+
+def _compare_and_delete_state(state_file: Path, expected_token: str) -> None:
+    """Only delete state file if the token matches (prevents deleting another daemon's state)."""
+    try:
+        if not state_file.exists():
+            return
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("token") == expected_token:
+            state_file.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 class AskDaemonServer:
@@ -29,6 +42,7 @@ class AskDaemonServer:
         request_handler: RequestHandler,
         request_queue_size: Optional[int] = None,
         on_stop: Optional[Callable[[], None]] = None,
+        scope_key: Optional[dict] = None,
     ):
         self.spec = spec
         self.host = host
@@ -38,11 +52,14 @@ class AskDaemonServer:
         self.request_handler = request_handler
         self.request_queue_size = request_queue_size
         self.on_stop = on_stop
+        self.scope_key = scope_key
+        self.scope_digest = _compute_scope_digest(scope_key) if scope_key else None
 
     def serve_forever(self) -> int:
         run_dir().mkdir(parents=True, exist_ok=True)
 
-        lock = ProviderLock(self.spec.lock_name, cwd="global", timeout=0.1)
+        lock_cwd = self.scope_digest or "global"
+        lock = ProviderLock(self.spec.lock_name, cwd=lock_cwd, timeout=0.1)
         if not lock.try_acquire():
             return 2
 
@@ -139,9 +156,9 @@ class AskDaemonServer:
                 httpd.last_activity = time.time()
                 httpd.activity_lock = threading.Lock()
                 try:
-                    httpd.idle_timeout_s = float(os.environ.get(self.spec.idle_timeout_env, "60") or "60")
+                    httpd.idle_timeout_s = float(os.environ.get(self.spec.idle_timeout_env, "5") or "5")
                 except Exception:
-                    httpd.idle_timeout_s = 60.0
+                    httpd.idle_timeout_s = 5.0
 
                 def _idle_monitor() -> None:
                     timeout_s = float(getattr(httpd, "idle_timeout_s", 60.0) or 0.0)
@@ -181,6 +198,7 @@ class AskDaemonServer:
                             self.on_stop()
                         except Exception:
                             pass
+                    _compare_and_delete_state(self.state_file, self.token)
         finally:
             try:
                 lock.release()
@@ -198,6 +216,9 @@ class AskDaemonServer:
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "python": sys.executable,
         }
+        if self.scope_key:
+            payload["scope_key"] = self.scope_key
+            payload["scope_key_digest"] = self.scope_digest
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         ok, _err = safe_write_session(self.state_file, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         if ok:

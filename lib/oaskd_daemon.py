@@ -257,10 +257,17 @@ class _WorkerPool:
 
 
 class OaskdServer:
-    def __init__(self, host: str = "127.0.0.1", port: int = 0, *, state_file: Optional[Path] = None):
+    def __init__(self, host: str = "127.0.0.1", port: int = 0, *, state_file: Optional[Path] = None, scope_key: Optional[dict] = None):
         self.host = host
         self.port = port
-        self.state_file = state_file or state_file_path(OASKD_SPEC.state_file_name)
+        self.scope_key = scope_key
+        if state_file:
+            self.state_file = state_file
+        elif scope_key:
+            from scope_key import scoped_state_file, scope_key_digest
+            self.state_file = scoped_state_file("oaskd", scope_key_digest(scope_key))
+        else:
+            self.state_file = state_file_path(OASKD_SPEC.state_file_name)
         self.token = random_token()
         self.pool = _WorkerPool()
 
@@ -311,37 +318,29 @@ class OaskdServer:
             state_file=self.state_file,
             request_handler=_handle_request,
             request_queue_size=128,
-            on_stop=self._cleanup_state_file,
+            scope_key=self.scope_key,
         )
         return server.serve_forever()
 
-    def _cleanup_state_file(self) -> None:
-        try:
-            st = read_state(self.state_file)
-        except Exception:
-            st = None
-        try:
-            if isinstance(st, dict) and int(st.get("pid") or 0) == os.getpid():
-                self.state_file.unlink(missing_ok=True)  # py3.8+: missing_ok
-        except TypeError:
-            try:
-                if isinstance(st, dict) and int(st.get("pid") or 0) == os.getpid() and self.state_file.exists():
-                    self.state_file.unlink()
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-def read_state(state_file: Optional[Path] = None) -> Optional[dict]:
+def read_state(state_file: Optional[Path] = None, *, work_dir: Optional[str] = None) -> Optional[dict]:
+    if state_file is None and work_dir:
+        from scope_key import resolve_state_file
+        state_file = resolve_state_file("oaskd", work_dir=work_dir)
     state_file = state_file or state_file_path(OASKD_SPEC.state_file_name)
     return askd_rpc.read_state(state_file)
 
 
-def ping_daemon(timeout_s: float = 0.5, state_file: Optional[Path] = None) -> bool:
+def ping_daemon(timeout_s: float = 0.5, state_file: Optional[Path] = None, *, work_dir: Optional[str] = None) -> bool:
+    if state_file is None and work_dir:
+        from scope_key import resolve_state_file
+        state_file = resolve_state_file("oaskd", work_dir=work_dir)
     state_file = state_file or state_file_path(OASKD_SPEC.state_file_name)
-    return askd_rpc.ping_daemon("oask", timeout_s, state_file)
+    return askd_rpc.ping_daemon("oask", timeout_s=timeout_s, state_file=state_file)
 
 
-def shutdown_daemon(timeout_s: float = 1.0, state_file: Optional[Path] = None) -> bool:
+def shutdown_daemon(timeout_s: float = 1.0, state_file: Optional[Path] = None, *, work_dir: Optional[str] = None) -> bool:
+    if state_file is None and work_dir:
+        from scope_key import resolve_state_file
+        state_file = resolve_state_file("oaskd", work_dir=work_dir)
     state_file = state_file or state_file_path(OASKD_SPEC.state_file_name)
     return askd_rpc.shutdown_daemon("oask", timeout_s, state_file)
