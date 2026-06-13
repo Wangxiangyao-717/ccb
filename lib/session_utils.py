@@ -126,13 +126,13 @@ def print_session_error(msg: str, to_stderr: bool = True) -> None:
     print(msg, file=output)
 
 
-def _iter_session_file_candidates(directory: Path, session_filename: str) -> Iterable[Path]:
+def _iter_candidates_in_dir(directory: Path, session_filename: str) -> Iterable[Path]:
+    """Yield session files from a single directory: base first, then numbered."""
     base = directory / session_filename
-    numbered: list[tuple[int, Path]] = []
-
     if base.exists():
         yield base
 
+    numbered: list[tuple[int, Path]] = []
     prefix = f"{session_filename}-"
     try:
         for path in directory.glob(f"{session_filename}-*"):
@@ -147,6 +147,22 @@ def _iter_session_file_candidates(directory: Path, session_filename: str) -> Ite
 
     for _idx, path in sorted(numbered, key=lambda item: item[0]):
         yield path
+
+
+def _iter_session_file_candidates(directory: Path, session_filename: str) -> Iterable[Path]:
+    """Yield session file candidates from a directory.
+
+    Search order: .ccb/ subdirectory first, then root directory.
+    Within each location, base file first, then numbered files in ascending order.
+    """
+    ccb_dir = directory / ".ccb"
+
+    # Phase 1: .ccb/ subdirectory
+    if ccb_dir.is_dir():
+        yield from _iter_candidates_in_dir(ccb_dir, session_filename)
+
+    # Phase 2: root directory (backward compat)
+    yield from _iter_candidates_in_dir(directory, session_filename)
 
 
 def _read_session_identity(path: Path) -> set[str]:
