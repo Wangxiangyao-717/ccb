@@ -186,21 +186,35 @@ def _read_session_identity(path: Path) -> set[str]:
 def allocate_session_file(work_dir: Path, session_filename: str, *, session_id: str | None = None) -> Path:
     directory = Path(work_dir).resolve()
     session_id = str(session_id or "").strip()
+    ccb_dir = directory / ".ccb"
 
+    # Phase 1: Check both locations for matching session_id (reuse existing file)
     for candidate in _iter_session_file_candidates(directory, session_filename):
         if session_id and session_id in _read_session_identity(candidate):
             return candidate
 
-    base = directory / session_filename
+    # Phase 2: Always allocate new files in .ccb/ subdirectory
+    ccb_dir.mkdir(parents=True, exist_ok=True)
+
+    base = ccb_dir / session_filename
     if not base.exists():
         return base
 
-    index = 1
-    while True:
-        candidate = directory / f"{session_filename}-{index}"
-        if not candidate.exists():
-            return candidate
-        index += 1
+    # Find next available index, considering both locations to avoid collisions
+    max_index = 0
+    prefix = f"{session_filename}-"
+    for scan_dir in (ccb_dir, directory):
+        try:
+            for path in scan_dir.glob(f"{session_filename}-*"):
+                if not path.is_file():
+                    continue
+                suffix = path.name[len(prefix):]
+                if suffix.isdigit():
+                    max_index = max(max_index, int(suffix))
+        except Exception:
+            pass
+
+    return ccb_dir / f"{session_filename}-{max_index + 1}"
 
 
 def find_project_session_file(work_dir: Path, session_filename: str, *, caller_pane_id: str | None = None, session_id: str | None = None) -> Optional[Path]:
@@ -286,7 +300,7 @@ def find_project_session_file(work_dir: Path, session_filename: str, *, caller_p
         elif len(active_candidates) == 1:
             return active_candidates[0][0]
         else:
-            return None  # Ambiguity - upper layer does phase 2
+            return active_candidates[0][0]  # .ccb/ comes first, prefer it
 
 
 def list_session_candidates(work_dir: Path, session_filename: str) -> list[Path]:
