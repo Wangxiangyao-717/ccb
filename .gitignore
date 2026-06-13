@@ -12,6 +12,14 @@ tests/
 .claude-session-*
 .opencode-session
 .opencode-session-*
+.ccb/.codex-session
+.ccb/.codex-session-*
+.ccb/.gemini-session
+.ccb/.gemini-session-*
+.ccb/.claude-session
+.ccb/.claude-session-*
+.ccb/.opencode-session
+.ccb/.opencode-session-*
 opencode.json
 .claude/
 *.mp4
